@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     const records = inbox_items.map((item: any) => {
       const fields: Record<string, any> = {};
 
-      if (item.project && item.project !== "TBD") fields["Project"] = item.project;
+      if (item.title && item.title !== "TBD") fields["Project"] = item.title;
       if (item.item_type) fields["Item Type"] = item.item_type;
       if (item.details && item.details !== "TBD") {
         fields["Details"] = item.details;
