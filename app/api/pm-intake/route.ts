@@ -61,6 +61,7 @@ export async function POST(req: Request) {
       const fields: Record<string, any> = {};
 
       if (item.project && item.project !== "TBD") fields["Project"] = item.project;
+      if (item.item_type) fields["Item Type"] = item.item_type;
       if (item.details && item.details !== "TBD") fields["Details"] = item.details;
       if (item.client && item.client !== "TBD") fields["Client"] = item.client;
       if (item.program && item.program !== "TBD") fields["Program"] = item.program;
