@@ -79,6 +79,9 @@ export async function POST(req: Request) {
     for (let i = 0; i < records.length; i += 10) {
       const chunk = records.slice(i, i + 10);
       console.log("[pm-intake] Calling Airtable.create for chunk", i / 10 + 1, "with", chunk.length, "records");
+      console.log("AIRTABLE_BASE_ID:", process.env.AIRTABLE_BASE_ID);
+      console.log("AIRTABLE_TABLE:", "Inbox");
+      console.log("AIRTABLE_KEY_PREFIX:", (process.env.AIRTABLE_API_KEY || "").slice(0, 3));
       const res = await base("Inbox").create(chunk, { typecast: true });
       created.push(...res);
     }
