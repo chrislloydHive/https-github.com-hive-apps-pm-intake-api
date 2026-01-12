@@ -35,6 +35,12 @@ function isAuthorized(req: Request) {
 }
 
 export async function POST(req: Request) {
+  console.log("[pm-intake] POST route hit");
+  console.log("[pm-intake] Headers present:", {
+    authorization: !!req.headers.get("authorization"),
+    "x-pm-intake-token": !!req.headers.get("x-pm-intake-token"),
+  });
+
   const authCheck = isAuthorized(req);
   if (!authCheck.ok) {
     return NextResponse.json({ error: "Unauthorized", details: authCheck.reason }, { status: 401 });
@@ -72,6 +78,7 @@ export async function POST(req: Request) {
     const created: any[] = [];
     for (let i = 0; i < records.length; i += 10) {
       const chunk = records.slice(i, i + 10);
+      console.log("[pm-intake] Calling Airtable.create for chunk", i / 10 + 1, "with", chunk.length, "records");
       const res = await base("Inbox").create(chunk, { typecast: true });
       created.push(...res);
     }
