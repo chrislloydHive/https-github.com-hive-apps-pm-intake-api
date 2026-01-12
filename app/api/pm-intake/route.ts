@@ -1,122 +1,87 @@
-import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
-import { config, tables, inboxFields } from "@/lib/config";
-import { createRecord } from "@/lib/airtable";
+import { NextResponse } from "next/server";
+import Airtable from "airtable";
 
-const inboxItemSchema = z.object({
-  project: z.string().min(1),
-  details: z.string().optional(),
-  client: z.string().optional(),
-  program: z.string().optional(),
-  workstream: z.string().optional(),
-  owner: z.string().optional(),
-  due_date: z.string().optional(),
-  source: z.string().optional(),
-  confidence: z.enum(["High", "Medium", "Low", "TBD"]).optional(),
-});
+const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(
+  process.env.AIRTABLE_BASE_ID as string
+);
 
-const requestSchema = z.object({
-  inbox_items: z.array(inboxItemSchema).min(1),
-});
+function isAuthorized(req: Request) {
+  const expected = process.env.PM_INTAKE_TOKEN;
 
-type InboxItemInput = z.infer<typeof inboxItemSchema>;
+  // If token isn't set in the deployed environment, it will ALWAYS 401
+  if (!expected || expected.trim().length === 0) {
+    return { ok: false, reason: "PM_INTAKE_TOKEN missing on server" };
+  }
 
-const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+  const auth = req.headers.get("authorization") || "";
+  const alt = req.headers.get("x-pm-intake-token") || "";
 
-function isValidDate(value: string | undefined): boolean {
-  return !!value && DATE_REGEX.test(value);
+  // Support:
+  // - Authorization: Bearer <token>
+  // - Authorization: <token>
+  let provided = "";
+  if (auth.toLowerCase().startsWith("bearer ")) {
+    provided = auth.slice(7).trim();
+  } else if (auth.trim().length > 0) {
+    provided = auth.trim();
+  } else if (alt.trim().length > 0) {
+    provided = alt.trim();
+  }
+
+  if (!provided) return { ok: false, reason: "No token provided" };
+  if (provided !== expected) return { ok: false, reason: "Token mismatch" };
+
+  return { ok: true as const };
 }
 
-function isTBD(value: string | undefined): boolean {
-  return value?.toUpperCase() === "TBD";
-}
-
-function buildInboxFields(item: InboxItemInput): Record<string, unknown> {
-  const fields: Record<string, unknown> = {};
-
-  fields[inboxFields.project] = item.project;
-  fields[inboxFields.status] = "New";
-
-  if (item.details && !isTBD(item.details)) {
-    fields[inboxFields.details] = item.details;
-  }
-  if (item.client && !isTBD(item.client)) {
-    fields[inboxFields.client] = item.client;
-  }
-  if (item.program && !isTBD(item.program)) {
-    fields[inboxFields.program] = item.program;
-  }
-  if (item.workstream && !isTBD(item.workstream)) {
-    fields[inboxFields.workstream] = item.workstream;
-  }
-  if (item.owner && !isTBD(item.owner)) {
-    fields[inboxFields.owner] = item.owner;
-  }
-  if (isValidDate(item.due_date)) {
-    fields[inboxFields.dueDate] = item.due_date;
-  }
-  if (item.source && !isTBD(item.source)) {
-    fields[inboxFields.source] = item.source;
-  }
-  if (item.confidence && !isTBD(item.confidence)) {
-    fields[inboxFields.confidence] = item.confidence;
+export async function POST(req: Request) {
+  const authCheck = isAuthorized(req);
+  if (!authCheck.ok) {
+    return NextResponse.json({ error: "Unauthorized", details: authCheck.reason }, { status: 401 });
   }
 
-  return fields;
-}
-
-export async function POST(request: NextRequest) {
-  const authHeader = request.headers.get("authorization");
-  const token = authHeader?.replace(/^Bearer\s+/i, "");
-
-  if (!token || token !== config.pmIntakeToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+    const body = await req.json();
+    const { inbox_items } = body;
 
-  const parseResult = requestSchema.safeParse(body);
-  if (!parseResult.success) {
+    if (!Array.isArray(inbox_items) || inbox_items.length === 0) {
+      return NextResponse.json(
+        { error: "Invalid payload: inbox_items must be a non-empty array" },
+        { status: 400 }
+      );
+    }
+
+    const records = inbox_items.map((item: any) => {
+      const fields: Record<string, any> = {};
+
+      if (item.project && item.project !== "TBD") fields["Project"] = item.project;
+      if (item.details && item.details !== "TBD") fields["Details"] = item.details;
+      if (item.client && item.client !== "TBD") fields["Client"] = item.client;
+      if (item.program && item.program !== "TBD") fields["Program"] = item.program;
+      if (item.workstream && item.workstream !== "TBD") fields["Workstream"] = item.workstream;
+      if (item.owner && item.owner !== "TBD") fields["Owner"] = item.owner;
+      if (item.due_date && /^\d{4}-\d{2}-\d{2}$/.test(item.due_date)) fields["Due Date"] = item.due_date;
+      if (item.source && item.source !== "TBD") fields["Source"] = item.source;
+      if (item.confidence && item.confidence !== "TBD") fields["Confidence"] = item.confidence;
+
+      fields["Status"] = "New";
+      return { fields };
+    });
+
+    // Airtable REST has a 10-record batch limit; chunk to be safe
+    const created: any[] = [];
+    for (let i = 0; i < records.length; i += 10) {
+      const chunk = records.slice(i, i + 10);
+      const res = await base("Inbox").create(chunk, { typecast: true });
+      created.push(...res);
+    }
+
+    return NextResponse.json({ success: true, createdCount: created.length }, { status: 200 });
+  } catch (error: any) {
+    console.error(error);
     return NextResponse.json(
-      { error: "Validation failed", details: parseResult.error.issues },
-      { status: 400 }
+      { error: "Failed to create Inbox records", details: error?.message ?? String(error) },
+      { status: 500 }
     );
   }
-
-  const { inbox_items } = parseResult.data;
-
-  let createdCount = 0;
-  const errors: { index: number; message: string }[] = [];
-
-  for (let i = 0; i < inbox_items.length; i++) {
-    const item = inbox_items[i];
-    try {
-      const fields = buildInboxFields(item);
-      await createRecord(tables.inbox, fields);
-      createdCount++;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      errors.push({ index: i, message });
-    }
-  }
-
-  const response: {
-    status: string;
-    createdCount: number;
-    errors?: { index: number; message: string }[];
-  } = {
-    status: "ok",
-    createdCount,
-  };
-
-  if (errors.length > 0) {
-    response.errors = errors;
-  }
-
-  return NextResponse.json(response);
 }
