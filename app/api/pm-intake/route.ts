@@ -34,6 +34,20 @@ function isAuthorized(req: Request) {
   return { ok: true as const };
 }
 
+function generateTitleFromDescription(description: string): string {
+  const trimmed = description.trim();
+  const firstSentenceMatch = trimmed.match(/^[^.!?]+[.!?]?/);
+  const firstSentence = firstSentenceMatch ? firstSentenceMatch[0].trim() : trimmed;
+  if (firstSentence.length <= 80) {
+    return firstSentence;
+  }
+  return firstSentence.slice(0, 80).trim();
+}
+
+function notEmpty(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "" && value.toUpperCase() !== "TBD";
+}
+
 export async function POST(req: Request) {
   console.log("[pm-intake] POST route hit");
   console.log("[pm-intake] Headers present:", {
@@ -60,21 +74,35 @@ export async function POST(req: Request) {
     const records = inbox_items.map((item: any) => {
       const fields: Record<string, any> = {};
 
-      if (item.title && item.title !== "TBD") fields["Project"] = item.title;
-      if (item.item_type) fields["Item Type"] = item.item_type;
-      if (item.details && item.details !== "TBD") {
-        fields["Details"] = item.details;
-        fields["Description"] = item.details;
+      // Description: prefer description, fall back to details
+      const description = notEmpty(item.description) ? item.description : (notEmpty(item.details) ? item.details : null);
+      if (description) {
+        fields["Description"] = description;
       }
-      if (item.client && item.client !== "TBD") fields["Client"] = item.client;
-      if (item.program && item.program !== "TBD") fields["Program"] = item.program;
-      if (item.workstream && item.workstream !== "TBD") fields["Workstream"] = item.workstream;
-      if (item.owner && item.owner !== "TBD") fields["Owner"] = item.owner;
-      if (item.due_date && /^\d{4}-\d{2}-\d{2}$/.test(item.due_date)) fields["Due Date"] = item.due_date;
-      if (item.source && item.source !== "TBD") fields["Source"] = item.source;
-      if (item.confidence && item.confidence !== "TBD") fields["Confidence"] = item.confidence;
 
+      // Title: prefer title, fall back to project, then auto-generate from description
+      let title = notEmpty(item.title) ? item.title : (notEmpty(item.project) ? item.project : null);
+      if (!title && description) {
+        title = generateTitleFromDescription(description);
+      }
+      if (!title) {
+        title = "Untitled Inbox Item";
+      }
+      fields["Title"] = title;
+
+      // Optional fields
+      if (notEmpty(item.client)) fields["Client"] = item.client;
+      if (notEmpty(item.program)) fields["Program"] = item.program;
+      if (notEmpty(item.workstream)) fields["Workstream"] = item.workstream;
+      if (notEmpty(item.owner)) fields["Owner"] = item.owner;
+      if (item.due_date && /^\d{4}-\d{2}-\d{2}$/.test(item.due_date)) fields["Due Date"] = item.due_date;
+
+      // Smart defaults
+      fields["Item Type"] = notEmpty(item.item_type) ? item.item_type : "Task";
+      fields["Source"] = notEmpty(item.source) ? item.source : "Meeting Notes";
+      fields["Confidence"] = notEmpty(item.confidence) ? item.confidence : "Medium";
       fields["Status"] = "New";
+
       return { fields };
     });
 
