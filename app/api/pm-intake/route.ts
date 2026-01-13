@@ -5,33 +5,37 @@ const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(
   process.env.AIRTABLE_BASE_ID as string
 );
 
-function isAuthorized(req: Request) {
-  const expected = process.env.PM_INTAKE_TOKEN;
+function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string } {
+  const expected = process.env.PM_INTAKE_BEARER_TOKEN;
 
-  // If token isn't set in the deployed environment, it will ALWAYS 401
   if (!expected || expected.trim().length === 0) {
-    return { ok: false, reason: "PM_INTAKE_TOKEN missing on server" };
+    return { ok: false, reason: "PM_INTAKE_BEARER_TOKEN missing on server" };
   }
 
   const auth = req.headers.get("authorization") || "";
-  const alt = req.headers.get("x-pm-intake-token") || "";
 
-  // Support:
-  // - Authorization: Bearer <token>
-  // - Authorization: <token>
+  if (!auth) {
+    return { ok: false, reason: "Authorization header missing" };
+  }
+
   let provided = "";
   if (auth.toLowerCase().startsWith("bearer ")) {
     provided = auth.slice(7).trim();
-  } else if (auth.trim().length > 0) {
-    provided = auth.trim();
-  } else if (alt.trim().length > 0) {
-    provided = alt.trim();
   }
 
-  if (!provided) return { ok: false, reason: "No token provided" };
-  if (provided !== expected) return { ok: false, reason: "Token mismatch" };
+  if (!provided) {
+    return { ok: false, reason: "Bearer token not provided" };
+  }
 
-  return { ok: true as const };
+  if (provided !== expected) {
+    return { ok: false, reason: "Token mismatch" };
+  }
+
+  return { ok: true };
+}
+
+function notEmpty(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "" && value.toUpperCase() !== "TBD";
 }
 
 function generateTitleFromDescription(description: string): string {
@@ -44,29 +48,31 @@ function generateTitleFromDescription(description: string): string {
   return firstSentence.slice(0, 80).trim();
 }
 
-function notEmpty(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "" && value.toUpperCase() !== "TBD";
-}
-
 export async function POST(req: Request) {
-  console.log("[pm-intake] POST route hit");
-  console.log("[pm-intake] Headers present:", {
-    authorization: !!req.headers.get("authorization"),
-    "x-pm-intake-token": !!req.headers.get("x-pm-intake-token"),
-  });
-
-  const authCheck = isAuthorized(req);
-  if (!authCheck.ok) {
-    return NextResponse.json({ error: "Unauthorized", details: authCheck.reason }, { status: 401 });
-  }
-
   try {
-    const body = await req.json();
+    const authCheck = isAuthorized(req);
+    if (!authCheck.ok) {
+      return NextResponse.json(
+        { success: false, createdCount: 0, errors: [{ index: -1, message: authCheck.reason }] },
+        { status: 401 }
+      );
+    }
+
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, createdCount: 0, errors: [{ index: -1, message: "Invalid JSON body" }] },
+        { status: 400 }
+      );
+    }
+
     const { inbox_items } = body;
 
     if (!Array.isArray(inbox_items) || inbox_items.length === 0) {
       return NextResponse.json(
-        { error: "Invalid payload: inbox_items must be a non-empty array" },
+        { success: false, createdCount: 0, errors: [{ index: -1, message: "inbox_items must be a non-empty array" }] },
         { status: 400 }
       );
     }
@@ -74,14 +80,9 @@ export async function POST(req: Request) {
     const records = inbox_items.map((item: any) => {
       const fields: Record<string, any> = {};
 
-      // Description: prefer description, fall back to details
-      const description = notEmpty(item.description) ? item.description : (notEmpty(item.details) ? item.details : null);
-      if (description) {
-        fields["Description"] = description;
-      }
-
-      // Title: prefer title, fall back to project, then auto-generate from description
-      let title = notEmpty(item.title) ? item.title : (notEmpty(item.project) ? item.project : null);
+      // Title: required, auto-generate from description if missing
+      let title = notEmpty(item.title) ? item.title : null;
+      const description = notEmpty(item.description) ? item.description : null;
       if (!title && description) {
         title = generateTitleFromDescription(description);
       }
@@ -90,39 +91,51 @@ export async function POST(req: Request) {
       }
       fields["Title"] = title;
 
+      // Description
+      if (description) {
+        fields["Description"] = description;
+      }
+
+      // Project: preserve as plain text, do not remap
+      if (notEmpty(item.project)) {
+        fields["Project"] = item.project;
+      }
+
       // Optional fields
       if (notEmpty(item.client)) fields["Client"] = item.client;
       if (notEmpty(item.program)) fields["Program"] = item.program;
       if (notEmpty(item.workstream)) fields["Workstream"] = item.workstream;
       if (notEmpty(item.owner)) fields["Owner"] = item.owner;
+      if (notEmpty(item.item_type)) fields["Item Type"] = item.item_type;
       if (item.due_date && /^\d{4}-\d{2}-\d{2}$/.test(item.due_date)) fields["Due Date"] = item.due_date;
+      if (notEmpty(item.source)) fields["Source"] = item.source;
+      if (notEmpty(item.confidence)) fields["Confidence"] = item.confidence;
 
-      // Smart defaults
-      fields["Item Type"] = notEmpty(item.item_type) ? item.item_type : "Task";
-      fields["Source"] = notEmpty(item.source) ? item.source : "Meeting Notes";
-      fields["Confidence"] = notEmpty(item.confidence) ? item.confidence : "Medium";
       fields["Status"] = "New";
 
       return { fields };
     });
 
-    // Airtable REST has a 10-record batch limit; chunk to be safe
     const created: any[] = [];
+    const errors: { index: number; message: string }[] = [];
+
     for (let i = 0; i < records.length; i += 10) {
       const chunk = records.slice(i, i + 10);
-      console.log("[pm-intake] Calling Airtable.create for chunk", i / 10 + 1, "with", chunk.length, "records");
-      console.log("AIRTABLE_BASE_ID:", process.env.AIRTABLE_BASE_ID);
-      console.log("AIRTABLE_TABLE:", "Inbox");
-      console.log("AIRTABLE_KEY_PREFIX:", (process.env.AIRTABLE_API_KEY || "").slice(0, 3));
-      const res = await base("Inbox").create(chunk, { typecast: true });
-      created.push(...res);
+      try {
+        const res = await base("Inbox").create(chunk, { typecast: true });
+        created.push(...res);
+      } catch (err: any) {
+        for (let j = 0; j < chunk.length; j++) {
+          errors.push({ index: i + j, message: err?.message ?? String(err) });
+        }
+      }
     }
 
-    return NextResponse.json({ success: true, createdCount: created.length }, { status: 200 });
+    return NextResponse.json({ success: true, createdCount: created.length, errors }, { status: 200 });
   } catch (error: any) {
-    console.error(error);
+    console.error("[pm-intake] Unexpected error:", error);
     return NextResponse.json(
-      { error: "Failed to create Inbox records", details: error?.message ?? String(error) },
+      { success: false, createdCount: 0, errors: [{ index: -1, message: error?.message ?? "Unknown error" }] },
       { status: 500 }
     );
   }
