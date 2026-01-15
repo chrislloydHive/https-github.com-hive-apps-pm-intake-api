@@ -428,6 +428,14 @@ export async function POST(req: Request) {
   const requestId = generateRequestId();
 
   try {
+    // Temporary auth debug log
+    console.log("[auth-debug]", {
+      hasEnvSecret: !!process.env.PM_INTAKE_SHARED_SECRET,
+      envSecretLen: (process.env.PM_INTAKE_SHARED_SECRET || "").length,
+      hasHeader: !!req.headers.get("x-hive-secret"),
+      headerLen: (req.headers.get("x-hive-secret") || "").length,
+    });
+
     // Auth check
     const authCheck = isAuthorized(req);
     if (!authCheck.ok) {
