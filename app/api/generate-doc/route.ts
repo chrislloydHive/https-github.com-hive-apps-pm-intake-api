@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createHash } from "crypto";
 import Airtable from "airtable";
 
 /**
@@ -87,39 +86,19 @@ function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function fingerprint(s: string): string {
-  if (!s) return "(empty)";
-  return createHash("sha256").update(s).digest("hex").slice(0, 10);
-}
+function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string } {
+  const envSecret = (process.env.PM_INTAKE_SHARED_SECRET || "").trim();
+  const headerSecret = (req.headers.get("x-hive-secret") || "").trim();
 
-function isAuthorized(req: Request, requestId: string): { ok: true } | { ok: false; reason: string } {
-  const envRaw = process.env.PM_INTAKE_SHARED_SECRET || "";
-  const headerRaw = req.headers.get("x-hive-secret") || "";
-  const envTrim = envRaw.trim();
-  const headerTrim = headerRaw.trim();
-
-  // Debug log with fingerprints (remove after verification)
-  console.log(`[auth-debug][${requestId}]`, {
-    hasEnv: !!envRaw,
-    envLenRaw: envRaw.length,
-    envLenTrim: envTrim.length,
-    envFp: fingerprint(envTrim),
-    hasHeader: !!headerRaw,
-    headerLenRaw: headerRaw.length,
-    headerLenTrim: headerTrim.length,
-    headerFp: fingerprint(headerTrim),
-    match: headerTrim === envTrim,
-  });
-
-  if (!envTrim) {
+  if (!envSecret) {
     return { ok: false, reason: "PM_INTAKE_SHARED_SECRET not configured on server" };
   }
 
-  if (!headerTrim) {
+  if (!headerSecret) {
     return { ok: false, reason: "x-hive-secret header missing" };
   }
 
-  if (headerTrim !== envTrim) {
+  if (headerSecret !== envSecret) {
     return { ok: false, reason: "Invalid secret" };
   }
 
@@ -449,7 +428,7 @@ export async function POST(req: Request) {
 
   try {
     // Auth check
-    const authCheck = isAuthorized(req, requestId);
+    const authCheck = isAuthorized(req);
     if (!authCheck.ok) {
       console.warn(`[generate-doc][${requestId}] Auth failed: ${authCheck.reason}`);
       return NextResponse.json(
