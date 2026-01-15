@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import Airtable from "airtable";
 
 /**
  * POST /api/generate-doc
@@ -16,9 +17,12 @@ import { z } from "zod";
  * - OPENAI_API_KEY: OpenAI API key for content generation
  * - APPS_SCRIPT_DOC_WEBAPP_URL: Google Apps Script /exec URL for doc creation
  * - PM_INTAKE_SHARED_SECRET: Shared secret for x-hive-secret header auth
+ * - AIRTABLE_API_KEY: Airtable API key for template lookup
+ * - AIRTABLE_BASE_ID: Airtable base ID containing Doc Templates table
  *
  * OPTIONAL ENV VARS:
- * - TEMPLATE_DOC_ID: Google Doc template ID (default provided below)
+ * - AIRTABLE_DOC_TEMPLATES_TABLE: Table name for templates (default: "Doc Templates")
+ * - TEMPLATE_DOC_ID: Fallback Google Doc template ID if no Airtable match
  *
  * Example curl:
  * curl -X POST https://pm-intake-api.vercel.app/api/generate-doc \
@@ -33,7 +37,7 @@ import { z } from "zod";
  *   }'
  */
 
-const DEFAULT_TEMPLATE_DOC_ID = "1f8Zn0Bd62c1RuvUN1k6YKfrrVkYhH6ugXbW9geh29vo";
+const DEFAULT_DOC_TEMPLATES_TABLE = "Doc Templates";
 
 // --- Zod Schemas ---
 
@@ -100,6 +104,105 @@ function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string 
   }
 
   return { ok: true };
+}
+
+// --- Airtable Template Lookup ---
+
+type TemplateResolutionResult =
+  | { ok: true; templateDocId: string; source: "airtable" | "env_fallback" }
+  | { ok: false; error: string; status: 400 | 500 | 502 };
+
+async function resolveTemplateDocId(
+  docType: string,
+  requestId: string
+): Promise<TemplateResolutionResult> {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const tableName = process.env.AIRTABLE_DOC_TEMPLATES_TABLE || DEFAULT_DOC_TEMPLATES_TABLE;
+
+  if (!apiKey || !baseId) {
+    // Fall back to env var if Airtable not configured
+    const fallbackId = process.env.TEMPLATE_DOC_ID;
+    if (fallbackId) {
+      console.log(
+        `[generate-doc][${requestId}] Airtable not configured, using TEMPLATE_DOC_ID fallback`
+      );
+      return { ok: true, templateDocId: fallbackId, source: "env_fallback" };
+    }
+    return {
+      ok: false,
+      error: "Airtable not configured and no TEMPLATE_DOC_ID fallback set",
+      status: 500,
+    };
+  }
+
+  const base = new Airtable({ apiKey }).base(baseId);
+
+  try {
+    console.log(
+      `[generate-doc][${requestId}] Querying Airtable for template: docType=${docType}`
+    );
+
+    // Query for active default templates matching the doc type
+    const records = await base(tableName)
+      .select({
+        filterByFormula: `AND({Active}, {Default for Doc Type}, {Doc Type} = "${docType}")`,
+        maxRecords: 10,
+      })
+      .firstPage();
+
+    if (records.length === 0) {
+      // No matching template found, try env fallback
+      const fallbackId = process.env.TEMPLATE_DOC_ID;
+      if (fallbackId) {
+        console.log(
+          `[generate-doc][${requestId}] No Airtable template found for docType=${docType}, using TEMPLATE_DOC_ID fallback`
+        );
+        return { ok: true, templateDocId: fallbackId, source: "env_fallback" };
+      }
+      return {
+        ok: false,
+        error: `No active default template found for docType: ${docType}`,
+        status: 400,
+      };
+    }
+
+    if (records.length > 1) {
+      const templateNames = records.map((r) => r.get("Template Name")).join(", ");
+      console.error(
+        `[generate-doc][${requestId}] Multiple default templates found for docType=${docType}: ${templateNames}`
+      );
+      return {
+        ok: false,
+        error: `Multiple default templates found for docType: ${docType}. Expected exactly one. Found: ${templateNames}`,
+        status: 500,
+      };
+    }
+
+    const templateDocId = records[0].get("Template Doc ID") as string;
+    if (!templateDocId) {
+      return {
+        ok: false,
+        error: `Template record found but Template Doc ID is empty for docType: ${docType}`,
+        status: 500,
+      };
+    }
+
+    console.log(
+      `[generate-doc][${requestId}] Resolved template for docType=${docType} → ${templateDocId}`
+    );
+    return { ok: true, templateDocId, source: "airtable" };
+  } catch (error: any) {
+    console.error(
+      `[generate-doc][${requestId}] Airtable lookup failed:`,
+      error?.message ?? error
+    );
+    return {
+      ok: false,
+      error: `Failed to resolve template from Airtable: ${error?.message ?? "Unknown error"}`,
+      status: 502,
+    };
+  }
 }
 
 // --- OpenAI Content Generation ---
@@ -371,8 +474,17 @@ export async function POST(req: Request) {
       );
     }
 
+    // Resolve template from Airtable (or fallback)
+    const templateResult = await resolveTemplateDocId(input.docType, requestId);
+    if (!templateResult.ok) {
+      return NextResponse.json(
+        { ok: false, error: templateResult.error, requestId },
+        { status: templateResult.status }
+      );
+    }
+    const templateDocId = templateResult.templateDocId;
+
     // Create doc in Drive via Apps Script
-    const templateDocId = process.env.TEMPLATE_DOC_ID || DEFAULT_TEMPLATE_DOC_ID;
     const docResult = await createDocInDrive(
       content,
       input.projectFolderId,
