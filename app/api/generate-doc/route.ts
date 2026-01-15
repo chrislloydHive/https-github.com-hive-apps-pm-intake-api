@@ -87,19 +87,26 @@ function generateRequestId(): string {
 }
 
 function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string } {
-  const expected = process.env.PM_INTAKE_SHARED_SECRET;
+  const envSecret = (process.env.PM_INTAKE_SHARED_SECRET || "").trim();
+  const headerSecret = (req.headers.get("x-hive-secret") || "").trim();
 
-  if (!expected || expected.trim().length === 0) {
+  // Debug log (remove after verification)
+  console.log("[auth-debug]", {
+    hasEnv: !!envSecret,
+    envLen: envSecret.length,
+    hasHeader: !!headerSecret,
+    headerLen: headerSecret.length,
+  });
+
+  if (!envSecret) {
     return { ok: false, reason: "PM_INTAKE_SHARED_SECRET not configured on server" };
   }
 
-  const provided = req.headers.get("x-hive-secret") || "";
-
-  if (!provided) {
+  if (!headerSecret) {
     return { ok: false, reason: "x-hive-secret header missing" };
   }
 
-  if (provided !== expected) {
+  if (headerSecret !== envSecret) {
     return { ok: false, reason: "Invalid secret" };
   }
 
@@ -428,14 +435,6 @@ export async function POST(req: Request) {
   const requestId = generateRequestId();
 
   try {
-    // Temporary auth debug log
-    console.log("[auth-debug]", {
-      hasEnvSecret: !!process.env.PM_INTAKE_SHARED_SECRET,
-      envSecretLen: (process.env.PM_INTAKE_SHARED_SECRET || "").length,
-      hasHeader: !!req.headers.get("x-hive-secret"),
-      headerLen: (req.headers.get("x-hive-secret") || "").length,
-    });
-
     // Auth check
     const authCheck = isAuthorized(req);
     if (!authCheck.ok) {
