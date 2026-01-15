@@ -345,8 +345,16 @@ ${input.sourceNotes}`;
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[generate-doc][${requestId}] OpenAI error: ${response.status}`, errorText.slice(0, 500));
-    throw new Error(`OpenAI API error: ${response.status}`);
+    console.error(`[generate-doc][${requestId}] OpenAI error: ${response.status}`, errorText);
+    // Include error details in thrown error for debugging
+    let errorDetail = "";
+    try {
+      const errJson = JSON.parse(errorText);
+      errorDetail = errJson.error?.message || errorText.slice(0, 200);
+    } catch {
+      errorDetail = errorText.slice(0, 200);
+    }
+    throw new Error(`OpenAI API error: ${response.status} - ${errorDetail}`);
   }
 
   const data = await response.json();
