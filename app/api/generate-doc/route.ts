@@ -210,9 +210,28 @@ async function generateStructuredContent(
   input: z.infer<typeof InputSchema>,
   requestId: string
 ): Promise<GeneratedContent> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const rawKey = process.env.OPENAI_API_KEY || "";
+  const apiKey = rawKey.trim();
+
+  // Debug log (remove after verification)
+  console.log(`[openai-debug][${requestId}]`, {
+    hasOpenAIKey: !!apiKey,
+    openAIKeyPrefix: apiKey ? apiKey.slice(0, 7) : "missing",
+    openAIKeyLen: apiKey.length,
+  });
+
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY not configured");
+  }
+
+  // Check for malformed key (e.g., "OPENAI_API_KEY=sk-...")
+  if (apiKey.includes("OPENAI_API_KEY=") || apiKey.includes("=")) {
+    throw new Error("OPENAI_API_KEY appears malformed (contains '=' - check env var format)");
+  }
+
+  // Validate key prefix
+  if (!apiKey.startsWith("sk-")) {
+    throw new Error(`OPENAI_API_KEY has unexpected prefix: ${apiKey.slice(0, 7)}...`);
   }
 
   const systemPrompt = `You are a business document specialist. Given raw notes, generate structured content for a professional branded document.
