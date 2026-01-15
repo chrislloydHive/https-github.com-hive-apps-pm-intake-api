@@ -269,7 +269,7 @@ ${input.sourceNotes}`;
 
   const jsonSchema = {
     name: "document_content",
-    strict: true,
+    strict: false,
     schema: {
       type: "object",
       properties: {
