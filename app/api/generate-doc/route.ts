@@ -119,7 +119,7 @@ async function createProjectFolder(
   projectName: string,
   requestId: string
 ): Promise<FolderResult> {
-  const folderName = `${clientName} / ${projectName}`;
+  const folderName = `${clientName} — ${projectName}`;
 
   console.log(`[generate-doc][${requestId}] Creating project folder: ${folderName}`);
 
@@ -159,34 +159,76 @@ async function createProjectFolder(
   }
 }
 
-// --- Airtable Write-Back ---
+// --- Airtable Helpers ---
 
-async function writeBackFolderIdToAirtable(
-  docRecordId: string,
-  folderId: string,
-  requestId: string
-): Promise<void> {
+function getAirtableBase() {
   const apiKey = process.env.AIRTABLE_API_KEY;
   const baseId = process.env.AIRTABLE_BASE_ID;
+  if (!apiKey || !baseId) return null;
+  return new Airtable({ apiKey }).base(baseId);
+}
+
+type ExistingDocResult =
+  | { exists: true; docId: string; docUrl: string; pdfUrl: string; projectFolderId: string }
+  | { exists: false };
+
+async function checkExistingDoc(
+  docRecordId: string,
+  requestId: string
+): Promise<ExistingDocResult> {
+  const base = getAirtableBase();
   const docsTable = process.env.AIRTABLE_DOCS_TABLE || "Docs";
 
-  if (!apiKey || !baseId) {
-    console.warn(`[generate-doc][${requestId}] Airtable not configured, skipping folder ID write-back`);
+  if (!base) {
+    console.warn(`[generate-doc][${requestId}] Airtable not configured, skipping idempotency check`);
+    return { exists: false };
+  }
+
+  try {
+    console.log(`[generate-doc][${requestId}] Checking for existing doc on record: ${docRecordId}`);
+    const record = await base(docsTable).find(docRecordId);
+
+    const docId = record.get("Doc ID") as string | undefined;
+    const docUrl = record.get("Doc URL") as string | undefined;
+
+    if (docId && docUrl) {
+      console.log(`[generate-doc][${requestId}] Found existing doc: ${docId}`);
+      return {
+        exists: true,
+        docId,
+        docUrl,
+        pdfUrl: (record.get("PDF URL") as string) || "",
+        projectFolderId: (record.get("Project Folder ID") as string) || "",
+      };
+    }
+
+    return { exists: false };
+  } catch (error: any) {
+    console.warn(`[generate-doc][${requestId}] Failed to check existing doc:`, error?.message ?? error);
+    return { exists: false };
+  }
+}
+
+async function writeBackToAirtable(
+  docRecordId: string,
+  fields: Record<string, string>,
+  requestId: string
+): Promise<void> {
+  const base = getAirtableBase();
+  const docsTable = process.env.AIRTABLE_DOCS_TABLE || "Docs";
+
+  if (!base) {
+    console.warn(`[generate-doc][${requestId}] Airtable not configured, skipping write-back`);
     return;
   }
 
   try {
-    console.log(`[generate-doc][${requestId}] Writing folder ID back to Airtable record: ${docRecordId}`);
-
-    const base = new Airtable({ apiKey }).base(baseId);
-    await base(docsTable).update(docRecordId, {
-      "Project Folder ID": folderId,
-    });
-
-    console.log(`[generate-doc][${requestId}] Folder ID written to Airtable successfully`);
+    console.log(`[generate-doc][${requestId}] Writing back to Airtable record: ${docRecordId}`, Object.keys(fields));
+    await base(docsTable).update(docRecordId, fields);
+    console.log(`[generate-doc][${requestId}] Airtable write-back successful`);
   } catch (error: any) {
     // Best-effort: log but don't fail
-    console.error(`[generate-doc][${requestId}] Failed to write folder ID to Airtable:`, error?.message ?? error);
+    console.error(`[generate-doc][${requestId}] Failed to write to Airtable:`, error?.message ?? error);
   }
 }
 
@@ -554,6 +596,25 @@ export async function POST(req: Request) {
     const input = parseResult.data;
     console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
 
+    // Idempotency check: if doc already exists, return it
+    if (input.docRecordId) {
+      const existingDoc = await checkExistingDoc(input.docRecordId, requestId);
+      if (existingDoc.exists) {
+        console.log(`[generate-doc][${requestId}] Returning existing doc (idempotency)`);
+        return NextResponse.json({
+          ok: true,
+          docId: existingDoc.docId,
+          docUrl: existingDoc.docUrl,
+          pdfUrl: existingDoc.pdfUrl,
+          projectFolderId: existingDoc.projectFolderId,
+          folderCreated: false,
+          reusedExisting: true,
+          debug: "Reused existing doc",
+          requestId,
+        });
+      }
+    }
+
     // Resolve project folder (create if missing)
     let projectFolderId = input.projectFolderId?.trim() || "";
     let folderCreated = false;
@@ -572,6 +633,7 @@ export async function POST(req: Request) {
           {
             ok: false,
             error: `Failed to create project folder: ${folderResult.error}`,
+            debug: "Folder creation failed",
             requestId,
           },
           { status: 502 }
@@ -581,9 +643,9 @@ export async function POST(req: Request) {
       projectFolderId = folderResult.folderId;
       folderCreated = true;
 
-      // Best-effort write-back to Airtable
+      // Best-effort write-back folder ID to Airtable
       if (input.docRecordId) {
-        await writeBackFolderIdToAirtable(input.docRecordId, projectFolderId, requestId);
+        await writeBackToAirtable(input.docRecordId, { "Project Folder ID": projectFolderId }, requestId);
       }
     }
 
@@ -594,7 +656,7 @@ export async function POST(req: Request) {
     } catch (error: any) {
       console.error(`[generate-doc][${requestId}] OpenAI generation failed:`, error);
       return NextResponse.json(
-        { ok: false, error: `Content generation failed: ${error.message}`, requestId },
+        { ok: false, error: `Content generation failed: ${error.message}`, debug: "OpenAI error", requestId },
         { status: 500 }
       );
     }
@@ -603,7 +665,7 @@ export async function POST(req: Request) {
     const templateResult = await resolveTemplateDocId(input.docType, requestId);
     if (!templateResult.ok) {
       return NextResponse.json(
-        { ok: false, error: templateResult.error, requestId },
+        { ok: false, error: templateResult.error, debug: "Template lookup failed", requestId },
         { status: templateResult.status }
       );
     }
@@ -619,24 +681,38 @@ export async function POST(req: Request) {
 
     if (!docResult.ok) {
       return NextResponse.json(
-        { ok: false, error: docResult.error, requestId },
+        { ok: false, error: docResult.error, debug: "Apps Script doc creation failed", requestId },
         { status: 502 }
       );
+    }
+
+    // Best-effort write-back doc info to Airtable
+    if (input.docRecordId && docResult.docId && docResult.docUrl) {
+      const writeBackFields: Record<string, string> = {
+        "Doc ID": docResult.docId,
+        "Doc URL": docResult.docUrl,
+      };
+      if (docResult.pdfUrl) {
+        writeBackFields["PDF URL"] = docResult.pdfUrl;
+      }
+      await writeBackToAirtable(input.docRecordId, writeBackFields, requestId);
     }
 
     return NextResponse.json({
       ok: true,
       docId: docResult.docId,
       docUrl: docResult.docUrl,
-      pdfUrl: docResult.pdfUrl,
+      pdfUrl: docResult.pdfUrl || "",
       projectFolderId,
       folderCreated,
+      reusedExisting: false,
+      debug: folderCreated ? "Created folder and doc" : "Created doc in existing folder",
       requestId,
     });
   } catch (error: any) {
     console.error(`[generate-doc][${requestId}] Unexpected error:`, error);
     return NextResponse.json(
-      { ok: false, error: error?.message ?? "Unknown error", requestId },
+      { ok: false, error: error?.message ?? "Unknown error", debug: "Unexpected error", requestId },
       { status: 500 }
     );
   }
