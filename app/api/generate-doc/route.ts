@@ -620,6 +620,7 @@ export async function POST(req: Request) {
 
     const input = parseResult.data;
     const docRecordId = input.docRecordId; // Already trimmed/normalized by schema
+    const receivedProjectFolderId = input.projectFolderId || null;
     console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
 
     // Idempotency check: if doc already exists, return it
@@ -629,20 +630,26 @@ export async function POST(req: Request) {
         console.log(`[generate-doc][${requestId}] Returning existing doc (idempotency)`);
         return NextResponse.json({
           ok: true,
+          docRecordId,
           docId: existingDoc.docId,
           docUrl: existingDoc.docUrl,
           pdfUrl: existingDoc.pdfUrl,
           projectFolderId: existingDoc.projectFolderId,
           folderCreated: false,
           reusedExisting: true,
-          debug: "Reused existing doc",
+          debug: {
+            message: "Reused existing doc",
+            receivedProjectFolderId,
+            usedProjectFolderId: existingDoc.projectFolderId,
+            folderCreated: false,
+          },
           requestId,
         });
       }
     }
 
     // Resolve project folder (create if missing)
-    let projectFolderId = input.projectFolderId || ""; // Already normalized by schema
+    let projectFolderId = receivedProjectFolderId || "";
     let folderCreated = false;
 
     if (!projectFolderId) {
@@ -659,7 +666,11 @@ export async function POST(req: Request) {
           {
             ok: false,
             error: `Failed to create project folder: ${folderResult.error}`,
-            debug: "Folder creation failed",
+            debug: {
+              message: "Folder creation failed",
+              receivedProjectFolderId,
+              folderError: folderResult.error,
+            },
             requestId,
           },
           { status: 502 }
@@ -682,7 +693,18 @@ export async function POST(req: Request) {
     } catch (error: any) {
       console.error(`[generate-doc][${requestId}] OpenAI generation failed:`, error);
       return NextResponse.json(
-        { ok: false, error: `Content generation failed: ${error.message}`, debug: "OpenAI error", requestId },
+        {
+          ok: false,
+          error: `Content generation failed: ${error.message}`,
+          debug: {
+            message: "OpenAI error",
+            receivedProjectFolderId,
+            usedProjectFolderId: projectFolderId,
+            folderCreated,
+            openaiError: error.message,
+          },
+          requestId,
+        },
         { status: 500 }
       );
     }
@@ -691,7 +713,17 @@ export async function POST(req: Request) {
     const templateResult = await resolveTemplateDocId(input.docType, requestId);
     if (!templateResult.ok) {
       return NextResponse.json(
-        { ok: false, error: templateResult.error, debug: "Template lookup failed", requestId },
+        {
+          ok: false,
+          error: templateResult.error,
+          debug: {
+            message: "Template lookup failed",
+            receivedProjectFolderId,
+            usedProjectFolderId: projectFolderId,
+            folderCreated,
+          },
+          requestId,
+        },
         { status: templateResult.status }
       );
     }
@@ -707,7 +739,18 @@ export async function POST(req: Request) {
 
     if (!docResult.ok) {
       return NextResponse.json(
-        { ok: false, error: docResult.error, debug: "Apps Script doc creation failed", requestId },
+        {
+          ok: false,
+          error: docResult.error,
+          debug: {
+            message: "Apps Script doc creation failed",
+            receivedProjectFolderId,
+            usedProjectFolderId: projectFolderId,
+            folderCreated,
+            appsScriptError: docResult.error,
+          },
+          requestId,
+        },
         { status: 502 }
       );
     }
@@ -727,19 +770,33 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
+      docRecordId: docRecordId || null,
       docId: docResult.docId,
       docUrl: docResult.docUrl,
       pdfUrl: docResult.pdfUrl || "",
       projectFolderId,
       folderCreated,
       reusedExisting: false,
-      debug: folderCreated ? "Created folder and doc" : "Created doc in existing folder",
+      debug: {
+        message: folderCreated ? "Created folder and doc" : "Created doc in existing folder",
+        receivedProjectFolderId,
+        usedProjectFolderId: projectFolderId,
+        folderCreated,
+      },
       requestId,
     });
   } catch (error: any) {
     console.error(`[generate-doc][${requestId}] Unexpected error:`, error);
     return NextResponse.json(
-      { ok: false, error: error?.message ?? "Unknown error", debug: "Unexpected error", requestId },
+      {
+        ok: false,
+        error: error?.message ?? "Unknown error",
+        debug: {
+          message: "Unexpected error",
+          errorStack: error?.stack?.slice(0, 500),
+        },
+        requestId,
+      },
       { status: 500 }
     );
   }
