@@ -42,15 +42,15 @@ const DEFAULT_DOC_TEMPLATES_TABLE = "Doc Templates";
 // --- Zod Schemas ---
 
 const InputSchema = z.object({
-  docRecordId: z.string().optional(),
+  docRecordId: z.string().optional().nullable(),
   projectName: z.string().min(1, "projectName is required"),
   clientName: z.string().min(1, "clientName is required"),
   docType: z.string().min(1, "docType is required"),
   sourceNotes: z.string().min(1, "sourceNotes is required"),
-  docTitleOverride: z.string().optional(),
-  subtitleOverride: z.string().optional(),
-  highlightsLabelOverride: z.string().optional(),
-  projectFolderId: z.string().optional(),
+  docTitleOverride: z.string().optional().nullable(),
+  subtitleOverride: z.string().optional().nullable(),
+  highlightsLabelOverride: z.string().optional().nullable(),
+  projectFolderId: z.string().optional().nullable(),
 });
 
 const BlockSchema = z.discriminatedUnion("type", [
@@ -597,8 +597,9 @@ export async function POST(req: Request) {
     console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
 
     // Idempotency check: if doc already exists, return it
-    if (input.docRecordId) {
-      const existingDoc = await checkExistingDoc(input.docRecordId, requestId);
+    const docRecordId = input.docRecordId?.trim() || null;
+    if (docRecordId) {
+      const existingDoc = await checkExistingDoc(docRecordId, requestId);
       if (existingDoc.exists) {
         console.log(`[generate-doc][${requestId}] Returning existing doc (idempotency)`);
         return NextResponse.json({
@@ -644,8 +645,8 @@ export async function POST(req: Request) {
       folderCreated = true;
 
       // Best-effort write-back folder ID to Airtable
-      if (input.docRecordId) {
-        await writeBackToAirtable(input.docRecordId, { "Project Folder ID": projectFolderId }, requestId);
+      if (docRecordId) {
+        await writeBackToAirtable(docRecordId, { "Project Folder ID": projectFolderId }, requestId);
       }
     }
 
@@ -687,7 +688,7 @@ export async function POST(req: Request) {
     }
 
     // Best-effort write-back doc info to Airtable
-    if (input.docRecordId && docResult.docId && docResult.docUrl) {
+    if (docRecordId && docResult.docId && docResult.docUrl) {
       const writeBackFields: Record<string, string> = {
         "Doc ID": docResult.docId,
         "Doc URL": docResult.docUrl,
@@ -696,7 +697,7 @@ export async function POST(req: Request) {
       if (docResult.pdfUrl) {
         writeBackFields["PDF URL"] = docResult.pdfUrl;
       }
-      await writeBackToAirtable(input.docRecordId, writeBackFields, requestId);
+      await writeBackToAirtable(docRecordId, writeBackFields, requestId);
     }
 
     return NextResponse.json({
