@@ -521,24 +521,28 @@ export async function POST(req: Request) {
   );
 
   // ---------------------------------------------------------------------------
-  // FOLDER RESOLUTION (constant: PREPARED_DOCUMENTS_FOLDER_ID)
+  // FOLDER RESOLUTION: PREPARED_DOCUMENTS_FOLDER_ID > projectFolderId
   // ---------------------------------------------------------------------------
-  const destinationFolderId = process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim();
+  const destinationFolderId =
+    process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim() ||
+    input.projectFolderId?.trim() ||
+    null;
 
   if (!destinationFolderId) {
-    console.error(`[generate-doc][${requestId}] PREPARED_DOCUMENTS_FOLDER_ID not configured`);
+    console.error(`[generate-doc][${requestId}] No destination folder available`);
     return NextResponse.json(
       {
         ok: false,
         status: 500,
-        error: "PREPARED_DOCUMENTS_FOLDER_ID env var is not configured. All docs go to Prepared Documents folder.",
+        error: "No destination folder. Set PREPARED_DOCUMENTS_FOLDER_ID env var or provide projectFolderId.",
         debug: { stage: "FOLDER" },
       },
       { status: 500 }
     );
   }
 
-  console.log(`[generate-doc][${requestId}] Destination folder: ${destinationFolderId} (Prepared Documents)`);
+  const folderSource = process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim() ? "env" : "payload";
+  console.log(`[generate-doc][${requestId}] Destination folder: ${destinationFolderId} (source: ${folderSource})`);
 
   // ---------------------------------------------------------------------------
   // TEMPLATE SELECTION
