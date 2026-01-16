@@ -50,7 +50,7 @@ const InputSchema = z.object({
   docTitleOverride: z.string().optional(),
   subtitleOverride: z.string().optional(),
   highlightsLabelOverride: z.string().optional(),
-  projectFolderId: z.string().min(1, "projectFolderId is required"),
+  projectFolderId: z.string().optional(),
 });
 
 const BlockSchema = z.discriminatedUnion("type", [
@@ -103,6 +103,91 @@ function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string 
   }
 
   return { ok: true };
+}
+
+// --- Project Folder Creation ---
+
+const APPS_SCRIPT_FOLDER_URL =
+  "https://script.google.com/macros/s/AKfycbx617qRmIJ8C-AJViav7FDdVvfrXRn7jNie1PdAIPW5Jz66peu4iM0yt8hSkrsuU9PVWA/exec";
+
+type FolderResult =
+  | { ok: true; folderId: string; folderUrl: string; created: boolean }
+  | { ok: false; error: string };
+
+async function createProjectFolder(
+  clientName: string,
+  projectName: string,
+  requestId: string
+): Promise<FolderResult> {
+  const folderName = `${clientName} / ${projectName}`;
+
+  console.log(`[generate-doc][${requestId}] Creating project folder: ${folderName}`);
+
+  try {
+    const response = await fetch(APPS_SCRIPT_FOLDER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recordId: requestId, // Use requestId as a reference
+        projectName: folderName,
+      }),
+      redirect: "follow",
+    });
+
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      console.error(`[generate-doc][${requestId}] Folder creation failed: ${response.status}`, responseText.slice(0, 300));
+      return { ok: false, error: `Folder creation failed: ${response.status}` };
+    }
+
+    const result = JSON.parse(responseText);
+    if (!result.ok || !result.folderId) {
+      return { ok: false, error: result.error || "Folder creation returned no folderId" };
+    }
+
+    console.log(`[generate-doc][${requestId}] Folder created: ${result.folderId}`);
+    return {
+      ok: true,
+      folderId: result.folderId,
+      folderUrl: result.folderUrl || "",
+      created: true,
+    };
+  } catch (error: any) {
+    console.error(`[generate-doc][${requestId}] Folder creation error:`, error);
+    return { ok: false, error: error?.message ?? "Unknown folder creation error" };
+  }
+}
+
+// --- Airtable Write-Back ---
+
+async function writeBackFolderIdToAirtable(
+  docRecordId: string,
+  folderId: string,
+  requestId: string
+): Promise<void> {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const docsTable = process.env.AIRTABLE_DOCS_TABLE || "Docs";
+
+  if (!apiKey || !baseId) {
+    console.warn(`[generate-doc][${requestId}] Airtable not configured, skipping folder ID write-back`);
+    return;
+  }
+
+  try {
+    console.log(`[generate-doc][${requestId}] Writing folder ID back to Airtable record: ${docRecordId}`);
+
+    const base = new Airtable({ apiKey }).base(baseId);
+    await base(docsTable).update(docRecordId, {
+      "Project Folder ID": folderId,
+    });
+
+    console.log(`[generate-doc][${requestId}] Folder ID written to Airtable successfully`);
+  } catch (error: any) {
+    // Best-effort: log but don't fail
+    console.error(`[generate-doc][${requestId}] Failed to write folder ID to Airtable:`, error?.message ?? error);
+  }
 }
 
 // --- Airtable Template Lookup ---
@@ -469,6 +554,39 @@ export async function POST(req: Request) {
     const input = parseResult.data;
     console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
 
+    // Resolve project folder (create if missing)
+    let projectFolderId = input.projectFolderId?.trim() || "";
+    let folderCreated = false;
+
+    if (!projectFolderId) {
+      console.log(`[generate-doc][${requestId}] projectFolderId missing, creating folder automatically`);
+
+      const folderResult = await createProjectFolder(
+        input.clientName,
+        input.projectName,
+        requestId
+      );
+
+      if (!folderResult.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: `Failed to create project folder: ${folderResult.error}`,
+            requestId,
+          },
+          { status: 502 }
+        );
+      }
+
+      projectFolderId = folderResult.folderId;
+      folderCreated = true;
+
+      // Best-effort write-back to Airtable
+      if (input.docRecordId) {
+        await writeBackFolderIdToAirtable(input.docRecordId, projectFolderId, requestId);
+      }
+    }
+
     // Generate content via OpenAI
     let content: GeneratedContent;
     try {
@@ -494,7 +612,7 @@ export async function POST(req: Request) {
     // Create doc in Drive via Apps Script
     const docResult = await createDocInDrive(
       content,
-      input.projectFolderId,
+      projectFolderId,
       templateDocId,
       requestId
     );
@@ -511,6 +629,8 @@ export async function POST(req: Request) {
       docId: docResult.docId,
       docUrl: docResult.docUrl,
       pdfUrl: docResult.pdfUrl,
+      projectFolderId,
+      folderCreated,
       requestId,
     });
   } catch (error: any) {
