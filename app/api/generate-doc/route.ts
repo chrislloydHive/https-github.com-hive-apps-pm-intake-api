@@ -146,7 +146,7 @@ const InputSchema = z.object({
   docType: z.string().min(1, "docType is required"),
   sourceNotes: z.string().min(1, "sourceNotes is required"),
   polishNotes: optionalString, // Optional additional instructions for polish
-  projectFolderId: optionalString, // Ignored - we use PREPARED_DOCUMENTS_FOLDER_ID
+  projectFolderId: optionalString, // IGNORED for placement - always use PREPARED_DOCUMENTS_FOLDER_ID
 });
 
 // GPT Polish output schema (strict)
