@@ -573,22 +573,44 @@ export async function POST(req: Request) {
     }
 
     // Parse body
-    let body: unknown;
+    let body: Record<string, unknown>;
     try {
       body = await req.json();
-    } catch {
+    } catch (e) {
+      console.error(`[generate-doc][${requestId}] JSON parse error:`, e);
       return NextResponse.json(
-        { ok: false, error: "Invalid JSON body", requestId },
+        { ok: false, error: "Invalid JSON body", debug: "Could not parse request body as JSON", requestId },
         { status: 400 }
       );
     }
+
+    // Log received fields (safe fields only, no sensitive data)
+    const safeLog = {
+      docRecordId: body.docRecordId ?? "(missing)",
+      projectName: body.projectName ?? "(missing)",
+      clientName: body.clientName ?? "(missing)",
+      docType: body.docType ?? "(missing)",
+      hasProjectFolderId: !!body.projectFolderId,
+      hasSourceNotes: !!body.sourceNotes,
+    };
+    console.log(`[generate-doc][${requestId}] Received request:`, safeLog);
 
     // Validate input
     const parseResult = InputSchema.safeParse(body);
     if (!parseResult.success) {
       const errors = parseResult.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
+      const firstError = parseResult.error.errors[0];
+      const missingField = firstError?.path?.[0] || "unknown";
+      console.warn(`[generate-doc][${requestId}] Validation failed:`, errors);
       return NextResponse.json(
-        { ok: false, error: "Validation failed", details: errors, requestId },
+        {
+          ok: false,
+          error: `Missing or invalid field: ${missingField}`,
+          details: errors,
+          received: safeLog,
+          debug: "Request validation failed",
+          requestId,
+        },
         { status: 400 }
       );
     }
