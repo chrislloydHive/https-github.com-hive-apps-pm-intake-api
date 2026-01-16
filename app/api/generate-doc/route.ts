@@ -562,6 +562,12 @@ async function createDocInDrive(
 // --- Main Handler ---
 
 export async function POST(req: Request) {
+  // TEMPORARY: Version check - remove after confirming deployment
+  return new Response(
+    JSON.stringify({ ok: false, debug: { version: "generate-doc_vPERM_001" } }),
+    { status: 418, headers: { "content-type": "application/json" } }
+  );
+
   const requestId = generateRequestId();
 
   try {
