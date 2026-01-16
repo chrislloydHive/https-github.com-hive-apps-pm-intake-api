@@ -41,16 +41,19 @@ const DEFAULT_DOC_TEMPLATES_TABLE = "Doc Templates";
 
 // --- Zod Schemas ---
 
+// Transform empty strings to null for optional fields
+const optionalString = z.string().optional().nullable().transform((val) => (val?.trim() || null));
+
 const InputSchema = z.object({
-  docRecordId: z.string().optional().nullable(),
+  docRecordId: optionalString,
   projectName: z.string().min(1, "projectName is required"),
   clientName: z.string().min(1, "clientName is required"),
   docType: z.string().min(1, "docType is required"),
   sourceNotes: z.string().min(1, "sourceNotes is required"),
-  docTitleOverride: z.string().optional().nullable(),
-  subtitleOverride: z.string().optional().nullable(),
-  highlightsLabelOverride: z.string().optional().nullable(),
-  projectFolderId: z.string().optional().nullable(),
+  docTitleOverride: optionalString,
+  subtitleOverride: optionalString,
+  highlightsLabelOverride: optionalString,
+  projectFolderId: optionalString,
 });
 
 const BlockSchema = z.discriminatedUnion("type", [
@@ -616,10 +619,10 @@ export async function POST(req: Request) {
     }
 
     const input = parseResult.data;
+    const docRecordId = input.docRecordId; // Already trimmed/normalized by schema
     console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
 
     // Idempotency check: if doc already exists, return it
-    const docRecordId = input.docRecordId?.trim() || null;
     if (docRecordId) {
       const existingDoc = await checkExistingDoc(docRecordId, requestId);
       if (existingDoc.exists) {
@@ -639,7 +642,7 @@ export async function POST(req: Request) {
     }
 
     // Resolve project folder (create if missing)
-    let projectFolderId = input.projectFolderId?.trim() || "";
+    let projectFolderId = input.projectFolderId || ""; // Already normalized by schema
     let folderCreated = false;
 
     if (!projectFolderId) {
