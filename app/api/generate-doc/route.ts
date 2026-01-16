@@ -548,6 +548,9 @@ export async function POST(req: Request) {
   const folderSource = process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim() ? "env" : "payload";
   console.log(`[generate-doc][${requestId}] Destination folder: ${destinationFolderId} (source: ${folderSource})`);
 
+  // Backwards-compat shim: set projectFolderId so legacy helpers pass validation
+  (body as Record<string, unknown>).projectFolderId = destinationFolderId;
+
   // ---------------------------------------------------------------------------
   // TEMPLATE SELECTION
   // ---------------------------------------------------------------------------
