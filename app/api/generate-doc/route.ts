@@ -3,7 +3,7 @@ import { z } from "zod";
 import Airtable from "airtable";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2025-01-16-1230";
+const BUILD_TAG = "generate-doc-2026-01-16-1230";
 
 /**
  * POST /api/generate-doc
