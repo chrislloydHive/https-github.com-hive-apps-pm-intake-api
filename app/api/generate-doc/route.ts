@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import Airtable from "airtable";
 
+// Build tag for debugging deployed versions
+const BUILD_TAG = "generate-doc-2025-01-16-1230";
+
 /**
  * POST /api/generate-doc
  *
@@ -484,7 +487,7 @@ export async function POST(req: Request) {
   const authCheck = isAuthorized(req);
   if (!authCheck.ok) {
     return NextResponse.json(
-      { ok: false, status: 401, error: authCheck.reason, debug: { stage: "AUTH" } },
+      { ok: false, status: 401, error: authCheck.reason, build: BUILD_TAG, debug: { stage: "AUTH" } },
       { status: 401 }
     );
   }
@@ -497,7 +500,7 @@ export async function POST(req: Request) {
     rawBody = await req.json();
   } catch {
     return NextResponse.json(
-      { ok: false, status: 400, error: "Invalid JSON body", debug: { stage: "PARSE" } },
+      { ok: false, status: 400, error: "Invalid JSON body", build: BUILD_TAG, debug: { stage: "PARSE" } },
       { status: 400 }
     );
   }
@@ -508,7 +511,7 @@ export async function POST(req: Request) {
   if (!parseResult.success) {
     const errors = parseResult.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
     return NextResponse.json(
-      { ok: false, status: 400, error: `Validation failed: ${errors[0]}`, debug: { stage: "VALIDATE", errors } },
+      { ok: false, status: 400, error: `Validation failed: ${errors[0]}`, build: BUILD_TAG, debug: { stage: "VALIDATE", errors } },
       { status: 400 }
     );
   }
@@ -534,7 +537,8 @@ export async function POST(req: Request) {
       {
         ok: false,
         status: 500,
-        error: "No destination folder. Set PREPARED_DOCUMENTS_FOLDER_ID env var or provide projectFolderId.",
+        error: "No destination folder. Set PREPARED_DOCUMENTS_FOLDER_ID env var.",
+        build: BUILD_TAG,
         debug: { stage: "FOLDER" },
       },
       { status: 500 }
@@ -590,6 +594,7 @@ export async function POST(req: Request) {
         ok: false,
         status: 500,
         error: polishResult.error,
+        build: BUILD_TAG,
         debug: { stage: "GPT_POLISH", raw: polishResult.raw?.slice(0, 300) },
       },
       { status: 500 }
@@ -628,6 +633,7 @@ export async function POST(req: Request) {
         ok: false,
         status: 500,
         error: docResult.error,
+        build: BUILD_TAG,
         debug: { stage: "DOC_CREATE", templateDocId, destinationFolderId },
       },
       { status: 500 }
@@ -674,13 +680,13 @@ export async function POST(req: Request) {
 // =============================================================================
 
 export async function GET() {
-  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST." }, { status: 405 });
+  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST.", build: BUILD_TAG }, { status: 405 });
 }
 
 export async function PUT() {
-  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST." }, { status: 405 });
+  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST.", build: BUILD_TAG }, { status: 405 });
 }
 
 export async function DELETE() {
-  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST." }, { status: 405 });
+  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST.", build: BUILD_TAG }, { status: 405 });
 }
