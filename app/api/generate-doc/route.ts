@@ -691,6 +691,7 @@ export async function POST(req: Request) {
       const writeBackFields: Record<string, string> = {
         "Doc ID": docResult.docId,
         "Doc URL": docResult.docUrl,
+        "Project Folder ID": projectFolderId,
       };
       if (docResult.pdfUrl) {
         writeBackFields["PDF URL"] = docResult.pdfUrl;
