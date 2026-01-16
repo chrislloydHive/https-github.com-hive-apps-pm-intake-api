@@ -24,6 +24,7 @@ import Airtable from "airtable";
  * - AIRTABLE_DOC_TEMPLATES_TABLE: Table name for templates (default: "Doc Templates")
  * - TEMPLATE_DOC_ID: Fallback Google Doc template ID if no Airtable match
  * - PM_DOCS_ROOT_FOLDER_ID: Root folder ID for creating new project folders
+ * - GOOGLE_DRIVE_PROJECTS_PARENT_FOLDER_ID: Alternative root folder ID
  *
  * Example curl:
  * curl -X POST https://pm-intake-api.vercel.app/api/generate-doc \
@@ -39,6 +40,98 @@ import Airtable from "airtable";
  */
 
 const DEFAULT_DOC_TEMPLATES_TABLE = "Doc Templates";
+
+// --- Airtable Value Coercion ---
+
+/**
+ * Coerces Airtable field values into strings.
+ * Airtable lookup/linked fields may arrive as:
+ * - string: "value"
+ * - array: ["value"] or [{ name: "value" }] or [{ value: "value" }]
+ * - object: { name: "value" } or { value: "value" }
+ *
+ * Returns trimmed string or null if empty/invalid.
+ */
+function coerceToString(val: unknown): string | null {
+  if (val === null || val === undefined) {
+    return null;
+  }
+
+  // Already a string
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    return trimmed || null;
+  }
+
+  // Array: take first element
+  if (Array.isArray(val)) {
+    if (val.length === 0) return null;
+    const first = val[0];
+    // If first element is an object, extract name/value
+    if (first && typeof first === "object") {
+      const obj = first as Record<string, unknown>;
+      if (typeof obj.name === "string") return obj.name.trim() || null;
+      if (typeof obj.value === "string") return obj.value.trim() || null;
+      // Fallback: stringify
+      try {
+        return JSON.stringify(first);
+      } catch {
+        return null;
+      }
+    }
+    // First element is primitive
+    if (typeof first === "string") return first.trim() || null;
+    if (typeof first === "number") return String(first);
+    return null;
+  }
+
+  // Object: extract name/value
+  if (typeof val === "object") {
+    const obj = val as Record<string, unknown>;
+    if (typeof obj.name === "string") return obj.name.trim() || null;
+    if (typeof obj.value === "string") return obj.value.trim() || null;
+    // Fallback: stringify
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return null;
+    }
+  }
+
+  // Number or other primitive
+  if (typeof val === "number") return String(val);
+
+  return null;
+}
+
+/**
+ * Pre-processes the request body to coerce Airtable field shapes.
+ * Returns a new object with string values for known fields.
+ */
+function coerceRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  const coerced: Record<string, unknown> = { ...body };
+
+  // Fields that should be coerced from Airtable shapes
+  const fieldsToCoerce = [
+    "docRecordId",
+    "projectName",
+    "clientName",
+    "docType",
+    "sourceNotes",
+    "docTitleOverride",
+    "subtitleOverride",
+    "highlightsLabelOverride",
+    "projectFolderId",
+  ];
+
+  for (const field of fieldsToCoerce) {
+    if (field in body) {
+      coerced[field] = coerceToString(body[field]);
+    }
+  }
+
+  return coerced;
+}
 
 // --- Zod Schemas ---
 
@@ -122,13 +215,21 @@ function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string 
  * - Drive URL with user: "https://drive.google.com/drive/u/0/folders/1AbCdEf..."
  * - URL with id param: "https://drive.google.com/open?id=1AbCdEf..."
  *
- * Returns null if input is empty, invalid, or cannot be parsed.
+ * Returns null if:
+ * - Input is empty
+ * - Input is an Airtable record ID (starts with "rec")
+ * - Input cannot be parsed as a valid Drive folder ID
  */
 function normalizeFolderId(input: string | null | undefined): string | null {
   if (!input) return null;
 
   const trimmed = input.trim();
   if (!trimmed) return null;
+
+  // Reject Airtable record IDs: recXXXXXXXXXXXXXX (rec followed by 14+ alphanumeric)
+  if (/^rec[a-zA-Z0-9]{10,}$/i.test(trimmed)) {
+    return null;
+  }
 
   // Pattern 1: .../folders/<id> (with optional query params)
   const foldersMatch = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
@@ -144,7 +245,13 @@ function normalizeFolderId(input: string | null | undefined): string | null {
 
   // Pattern 3: Raw folder ID (alphanumeric with dashes/underscores, typically 25-60 chars)
   // Must not contain slashes, dots, or other URL characters
-  if (/^[a-zA-Z0-9_-]{10,}$/.test(trimmed) && !trimmed.includes("/") && !trimmed.includes(".")) {
+  // Must not start with "rec" (Airtable record ID)
+  if (
+    /^[a-zA-Z0-9_-]{10,}$/.test(trimmed) &&
+    !trimmed.includes("/") &&
+    !trimmed.includes(".") &&
+    !trimmed.toLowerCase().startsWith("rec")
+  ) {
     return trimmed;
   }
 
@@ -166,9 +273,13 @@ async function createProjectFolder(
   projectName: string,
   requestId: string
 ): Promise<FolderResult> {
+  // Create folder name: "ClientName — ProjectName"
   const folderName = `${clientName} — ${projectName}`;
+
+  // Get root folder ID from env vars (check multiple possible names)
   const rootFolderId =
     process.env.PM_DOCS_ROOT_FOLDER_ID ||
+    process.env.GOOGLE_DRIVE_PROJECTS_PARENT_FOLDER_ID ||
     process.env.DRIVE_ROOT_FOLDER_ID ||
     process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
@@ -179,11 +290,10 @@ async function createProjectFolder(
 
   try {
     const payload: Record<string, string> = {
-      recordId: requestId, // Use requestId as a reference
+      recordId: requestId,
       projectName: folderName,
     };
 
-    // Include root folder ID if configured
     if (rootFolderId) {
       payload.parentFolderId = rootFolderId;
     }
@@ -246,14 +356,12 @@ async function checkExistingDoc(docRecordId: string, requestId: string): Promise
   }
 
   try {
-    console.log(`[generate-doc][${requestId}] Checking for existing doc on record: ${docRecordId}`);
     const record = await base(docsTable).find(docRecordId);
 
     const docId = record.get("Doc ID") as string | undefined;
     const docUrl = record.get("Doc URL") as string | undefined;
 
     if (docId && docUrl) {
-      console.log(`[generate-doc][${requestId}] Found existing doc: ${docId}`);
       return {
         exists: true,
         docId,
@@ -279,20 +387,13 @@ async function writeBackToAirtable(
   const docsTable = process.env.AIRTABLE_DOCS_TABLE || "Docs";
 
   if (!base) {
-    console.warn(`[generate-doc][${requestId}] Airtable not configured, skipping write-back`);
     return;
   }
 
   try {
-    console.log(
-      `[generate-doc][${requestId}] Writing back to Airtable record: ${docRecordId}`,
-      Object.keys(fields)
-    );
     await base(docsTable).update(docRecordId, fields);
-    console.log(`[generate-doc][${requestId}] Airtable write-back successful`);
   } catch (error: any) {
-    // Best-effort: log but don't fail
-    console.error(`[generate-doc][${requestId}] Failed to write to Airtable:`, error?.message ?? error);
+    console.error(`[generate-doc][${requestId}] Airtable write-back failed:`, error?.message ?? error);
   }
 }
 
@@ -308,10 +409,8 @@ async function resolveTemplateDocId(docType: string, requestId: string): Promise
   const tableName = process.env.AIRTABLE_DOC_TEMPLATES_TABLE || DEFAULT_DOC_TEMPLATES_TABLE;
 
   if (!apiKey || !baseId) {
-    // Fall back to env var if Airtable not configured
     const fallbackId = process.env.TEMPLATE_DOC_ID;
     if (fallbackId) {
-      console.log(`[generate-doc][${requestId}] Airtable not configured, using TEMPLATE_DOC_ID fallback`);
       return { ok: true, templateDocId: fallbackId, source: "env_fallback" };
     }
     return {
@@ -323,9 +422,6 @@ async function resolveTemplateDocId(docType: string, requestId: string): Promise
   const base = new Airtable({ apiKey }).base(baseId);
 
   try {
-    console.log(`[generate-doc][${requestId}] Querying Airtable for template: docType=${docType}`);
-
-    // Query for active default templates matching the doc type
     const records = await base(tableName)
       .select({
         filterByFormula: `AND({Active}, {Default for Doc Type}, {Doc Type} = "${docType}")`,
@@ -334,12 +430,8 @@ async function resolveTemplateDocId(docType: string, requestId: string): Promise
       .firstPage();
 
     if (records.length === 0) {
-      // No matching template found, try env fallback
       const fallbackId = process.env.TEMPLATE_DOC_ID;
       if (fallbackId) {
-        console.log(
-          `[generate-doc][${requestId}] No Airtable template found for docType=${docType}, using TEMPLATE_DOC_ID fallback`
-        );
         return { ok: true, templateDocId: fallbackId, source: "env_fallback" };
       }
       return {
@@ -350,12 +442,9 @@ async function resolveTemplateDocId(docType: string, requestId: string): Promise
 
     if (records.length > 1) {
       const templateNames = records.map((r) => r.get("Template Name")).join(", ");
-      console.error(
-        `[generate-doc][${requestId}] Multiple default templates found for docType=${docType}: ${templateNames}`
-      );
       return {
         ok: false,
-        error: `Multiple default templates found for docType: ${docType}. Expected exactly one. Found: ${templateNames}`,
+        error: `Multiple default templates found for docType: ${docType}. Found: ${templateNames}`,
       };
     }
 
@@ -367,10 +456,8 @@ async function resolveTemplateDocId(docType: string, requestId: string): Promise
       };
     }
 
-    console.log(`[generate-doc][${requestId}] Resolved template for docType=${docType} → ${templateDocId}`);
     return { ok: true, templateDocId, source: "airtable" };
   } catch (error: any) {
-    console.error(`[generate-doc][${requestId}] Airtable lookup failed:`, error?.message ?? error);
     return {
       ok: false,
       error: `Failed to resolve template from Airtable: ${error?.message ?? "Unknown error"}`,
@@ -476,8 +563,6 @@ ${input.sourceNotes}`;
     },
   };
 
-  console.log(`[generate-doc][${requestId}] Calling OpenAI for content generation`);
-
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -500,8 +585,6 @@ ${input.sourceNotes}`;
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[generate-doc][${requestId}] OpenAI error: ${response.status}`, errorText);
-    // Include error details in thrown error for debugging
     let errorDetail = "";
     try {
       const errJson = JSON.parse(errorText);
@@ -522,7 +605,6 @@ ${input.sourceNotes}`;
   const parsed = JSON.parse(content);
   const validated = GeneratedContentSchema.parse(parsed);
 
-  console.log(`[generate-doc][${requestId}] OpenAI content generated successfully`);
   return validated;
 }
 
@@ -537,14 +619,12 @@ async function createDocInDrive(
   const appsScriptUrl = process.env.APPS_SCRIPT_DOC_WEBAPP_URL;
 
   if (!appsScriptUrl) {
-    console.warn(
-      `[generate-doc][${requestId}] APPS_SCRIPT_DOC_WEBAPP_URL not configured, returning stub response`
-    );
+    console.warn(`[generate-doc][${requestId}] APPS_SCRIPT_DOC_WEBAPP_URL not configured, returning stub`);
     return {
       ok: true,
       docId: "STUB_DOC_ID",
       docUrl: "https://docs.google.com/document/d/STUB_DOC_ID/edit",
-      pdfUrl: undefined,
+      pdfUrl: "",
     };
   }
 
@@ -564,8 +644,6 @@ async function createDocInDrive(
     appendixBlocks: content.appendixBlocks || [],
   };
 
-  console.log(`[generate-doc][${requestId}] Calling Apps Script to create doc`);
-
   const response = await fetch(appsScriptUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -576,10 +654,6 @@ async function createDocInDrive(
   const responseText = await response.text();
 
   if (!response.ok) {
-    console.error(
-      `[generate-doc][${requestId}] Apps Script error: ${response.status}`,
-      responseText.slice(0, 500)
-    );
     return {
       ok: false,
       error: `Apps Script returned ${response.status}: ${responseText.slice(0, 200)}`,
@@ -594,7 +668,6 @@ async function createDocInDrive(
         error: result.error || "Apps Script returned ok:false",
       };
     }
-    console.log(`[generate-doc][${requestId}] Doc created successfully: ${result.docId}`);
     return result;
   } catch {
     return {
@@ -612,45 +685,28 @@ export async function POST(req: Request) {
   // Stage: AUTH
   const authCheck = isAuthorized(req);
   if (!authCheck.ok) {
-    console.warn(`[generate-doc][${requestId}] Auth failed: ${authCheck.reason}`);
     return NextResponse.json(
-      {
-        ok: false,
-        error: authCheck.reason,
-        debug: { stage: "AUTH" },
-      },
+      { ok: false, error: authCheck.reason, debug: { stage: "AUTH" } },
       { status: 401 }
     );
   }
 
   // Stage: VALIDATION - Parse body
-  let body: Record<string, unknown>;
+  let rawBody: Record<string, unknown>;
   try {
-    body = await req.json();
-  } catch (e) {
-    console.error(`[generate-doc][${requestId}] JSON parse error:`, e);
+    rawBody = await req.json();
+  } catch {
     return NextResponse.json(
-      {
-        ok: false,
-        error: "Invalid JSON body",
-        debug: { stage: "VALIDATION", details: "Could not parse request body as JSON" },
-      },
-      { status: 500 }
+      { ok: false, error: "Invalid JSON body", debug: { stage: "VALIDATION" } },
+      { status: 400 }
     );
   }
 
-  // Log received fields (safe fields only, no sensitive data)
-  const receivedProjectFolderIdRaw = (body.projectFolderId as string) || null;
-  const safeLog = {
-    docRecordId: body.docRecordId ?? "(missing)",
-    projectName: body.projectName ?? "(missing)",
-    clientName: body.clientName ?? "(missing)",
-    docType: body.docType ?? "(missing)",
-    hasProjectFolderId: !!body.projectFolderId,
-    projectFolderIdRaw: receivedProjectFolderIdRaw,
-    hasSourceNotes: !!body.sourceNotes,
-  };
-  console.log(`[generate-doc][${requestId}] Received request:`, safeLog);
+  // Coerce Airtable field shapes before validation
+  const body = coerceRequestBody(rawBody);
+
+  // Capture raw projectFolderId for logging
+  const receivedProjectFolderId = (body.projectFolderId as string) || null;
 
   // Stage: VALIDATION - Validate input schema
   const parseResult = InputSchema.safeParse(body);
@@ -658,52 +714,36 @@ export async function POST(req: Request) {
     const errors = parseResult.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
     const firstError = parseResult.error.errors[0];
     const missingField = firstError?.path?.[0] || "unknown";
-    console.warn(`[generate-doc][${requestId}] Validation failed:`, errors);
     return NextResponse.json(
       {
         ok: false,
         error: `Missing or invalid field: ${missingField}`,
-        debug: {
-          stage: "VALIDATION",
-          details: errors,
-          received: safeLog,
-        },
+        debug: { stage: "VALIDATION", details: errors },
       },
-      { status: 500 }
+      { status: 400 }
     );
   }
 
   const input = parseResult.data;
   const docRecordId = input.docRecordId;
 
-  // Normalize folder ID (extract from URL if needed)
-  const receivedProjectFolderId = input.projectFolderId || null;
+  // Normalize folder ID (extract from URL, reject Airtable record IDs)
   const normalizedFolderId = normalizeFolderId(receivedProjectFolderId);
-
-  console.log(
-    `[generate-doc][${requestId}] Folder ID normalization: received="${receivedProjectFolderId}" → normalized="${normalizedFolderId}"`
-  );
-  console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
 
   // Idempotency check: if doc already exists, return it
   if (docRecordId) {
     const existingDoc = await checkExistingDoc(docRecordId, requestId);
     if (existingDoc.exists) {
-      console.log(`[generate-doc][${requestId}] Returning existing doc (idempotency)`);
+      console.log(
+        `[generate-doc][${requestId}] docRecordId=${docRecordId} folderCreated=false docUrl=${existingDoc.docUrl} (reused)`
+      );
       return NextResponse.json({
         ok: true,
-        docRecordId,
-        docId: existingDoc.docId,
         docUrl: existingDoc.docUrl,
+        docId: existingDoc.docId,
         pdfUrl: existingDoc.pdfUrl,
         projectFolderId: existingDoc.projectFolderId,
         folderCreated: false,
-        debug: {
-          receivedProjectFolderId,
-          usedProjectFolderId: existingDoc.projectFolderId,
-          folderCreated: false,
-          reusedExisting: true,
-        },
       });
     }
   }
@@ -713,8 +753,6 @@ export async function POST(req: Request) {
   let folderCreated = false;
 
   if (!projectFolderId) {
-    console.log(`[generate-doc][${requestId}] projectFolderId missing/invalid, creating folder automatically`);
-
     const folderResult = await createProjectFolder(input.clientName, input.projectName, requestId);
 
     if (!folderResult.ok) {
@@ -722,12 +760,7 @@ export async function POST(req: Request) {
         {
           ok: false,
           error: `Failed to create project folder: ${folderResult.error}`,
-          debug: {
-            stage: "FOLDER_CREATE",
-            details: folderResult.error,
-            receivedProjectFolderId,
-            normalizedFolderId,
-          },
+          debug: { stage: "FOLDER_CREATE", details: folderResult.error },
         },
         { status: 500 }
       );
@@ -747,18 +780,11 @@ export async function POST(req: Request) {
   try {
     content = await generateStructuredContent(input, requestId);
   } catch (error: any) {
-    console.error(`[generate-doc][${requestId}] OpenAI generation failed:`, error);
     return NextResponse.json(
       {
         ok: false,
         error: `Content generation failed: ${error.message}`,
-        debug: {
-          stage: "DOC_CREATE",
-          details: error.message,
-          receivedProjectFolderId,
-          usedProjectFolderId: projectFolderId,
-          folderCreated,
-        },
+        debug: { stage: "DOC_CREATE", details: error.message },
       },
       { status: 500 }
     );
@@ -771,13 +797,7 @@ export async function POST(req: Request) {
       {
         ok: false,
         error: templateResult.error,
-        debug: {
-          stage: "DOC_CREATE",
-          details: "Template lookup failed: " + templateResult.error,
-          receivedProjectFolderId,
-          usedProjectFolderId: projectFolderId,
-          folderCreated,
-        },
+        debug: { stage: "DOC_CREATE", details: templateResult.error },
       },
       { status: 500 }
     );
@@ -792,13 +812,7 @@ export async function POST(req: Request) {
       {
         ok: false,
         error: docResult.error,
-        debug: {
-          stage: "DOC_CREATE",
-          details: docResult.error,
-          receivedProjectFolderId,
-          usedProjectFolderId: projectFolderId,
-          folderCreated,
-        },
+        debug: { stage: "DOC_CREATE", details: docResult.error },
       },
       { status: 500 }
     );
@@ -810,13 +824,7 @@ export async function POST(req: Request) {
       {
         ok: false,
         error: "Doc creation succeeded but missing docId or docUrl",
-        debug: {
-          stage: "DOC_CREATE",
-          details: { docId: docResult.docId, docUrl: docResult.docUrl },
-          receivedProjectFolderId,
-          usedProjectFolderId: projectFolderId,
-          folderCreated,
-        },
+        debug: { stage: "DOC_CREATE" },
       },
       { status: 500 }
     );
@@ -835,20 +843,19 @@ export async function POST(req: Request) {
     await writeBackToAirtable(docRecordId, writeBackFields, requestId);
   }
 
-  // Success response
+  // Concise summary log
+  console.log(
+    `[generate-doc][${requestId}] docRecordId=${docRecordId || "(none)"} folderCreated=${folderCreated} docUrl=${docResult.docUrl}`
+  );
+
+  // Success response - exact keys as specified
   return NextResponse.json({
     ok: true,
-    docRecordId: docRecordId || "",
+    docUrl: docResult.docUrl,
+    docId: docResult.docId,
+    pdfUrl: docResult.pdfUrl || "",
     projectFolderId,
     folderCreated,
-    docId: docResult.docId,
-    docUrl: docResult.docUrl,
-    pdfUrl: docResult.pdfUrl || "",
-    debug: {
-      receivedProjectFolderId,
-      usedProjectFolderId: projectFolderId,
-      folderCreated,
-    },
   });
 }
 
