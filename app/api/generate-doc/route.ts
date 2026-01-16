@@ -23,6 +23,7 @@ import Airtable from "airtable";
  * OPTIONAL ENV VARS:
  * - AIRTABLE_DOC_TEMPLATES_TABLE: Table name for templates (default: "Doc Templates")
  * - TEMPLATE_DOC_ID: Fallback Google Doc template ID if no Airtable match
+ * - PM_DOCS_ROOT_FOLDER_ID: Root folder ID for creating new project folders
  *
  * Example curl:
  * curl -X POST https://pm-intake-api.vercel.app/api/generate-doc \
@@ -42,7 +43,11 @@ const DEFAULT_DOC_TEMPLATES_TABLE = "Doc Templates";
 // --- Zod Schemas ---
 
 // Transform empty strings to null for optional fields
-const optionalString = z.string().optional().nullable().transform((val) => (val?.trim() || null));
+const optionalString = z
+  .string()
+  .optional()
+  .nullable()
+  .transform((val) => (val?.trim() || null));
 
 const InputSchema = z.object({
   docRecordId: optionalString,
@@ -53,7 +58,7 @@ const InputSchema = z.object({
   docTitleOverride: optionalString,
   subtitleOverride: optionalString,
   highlightsLabelOverride: optionalString,
-  projectFolderId: optionalString,
+  projectFolderId: optionalString, // Optional: will create folder if missing
 });
 
 const BlockSchema = z.discriminatedUnion("type", [
@@ -108,6 +113,45 @@ function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string 
   return { ok: true };
 }
 
+// --- Folder ID Normalization ---
+
+/**
+ * Extracts a Google Drive folder ID from various formats:
+ * - Raw folder ID: "1AbCdEf..."
+ * - Drive URL: "https://drive.google.com/drive/folders/1AbCdEf..."
+ * - Drive URL with user: "https://drive.google.com/drive/u/0/folders/1AbCdEf..."
+ * - URL with id param: "https://drive.google.com/open?id=1AbCdEf..."
+ *
+ * Returns null if input is empty, invalid, or cannot be parsed.
+ */
+function normalizeFolderId(input: string | null | undefined): string | null {
+  if (!input) return null;
+
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Pattern 1: .../folders/<id> (with optional query params)
+  const foldersMatch = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (foldersMatch) {
+    return foldersMatch[1];
+  }
+
+  // Pattern 2: ?id=<id> or &id=<id>
+  const idParamMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (idParamMatch) {
+    return idParamMatch[1];
+  }
+
+  // Pattern 3: Raw folder ID (alphanumeric with dashes/underscores, typically 25-60 chars)
+  // Must not contain slashes, dots, or other URL characters
+  if (/^[a-zA-Z0-9_-]{10,}$/.test(trimmed) && !trimmed.includes("/") && !trimmed.includes(".")) {
+    return trimmed;
+  }
+
+  // Could not parse - return null
+  return null;
+}
+
 // --- Project Folder Creation ---
 
 const APPS_SCRIPT_FOLDER_URL =
@@ -123,24 +167,41 @@ async function createProjectFolder(
   requestId: string
 ): Promise<FolderResult> {
   const folderName = `${clientName} — ${projectName}`;
+  const rootFolderId =
+    process.env.PM_DOCS_ROOT_FOLDER_ID ||
+    process.env.DRIVE_ROOT_FOLDER_ID ||
+    process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
   console.log(`[generate-doc][${requestId}] Creating project folder: ${folderName}`);
+  if (rootFolderId) {
+    console.log(`[generate-doc][${requestId}] Using root folder: ${rootFolderId}`);
+  }
 
   try {
+    const payload: Record<string, string> = {
+      recordId: requestId, // Use requestId as a reference
+      projectName: folderName,
+    };
+
+    // Include root folder ID if configured
+    if (rootFolderId) {
+      payload.parentFolderId = rootFolderId;
+    }
+
     const response = await fetch(APPS_SCRIPT_FOLDER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        recordId: requestId, // Use requestId as a reference
-        projectName: folderName,
-      }),
+      body: JSON.stringify(payload),
       redirect: "follow",
     });
 
     const responseText = await response.text();
 
     if (!response.ok) {
-      console.error(`[generate-doc][${requestId}] Folder creation failed: ${response.status}`, responseText.slice(0, 300));
+      console.error(
+        `[generate-doc][${requestId}] Folder creation failed: ${response.status}`,
+        responseText.slice(0, 300)
+      );
       return { ok: false, error: `Folder creation failed: ${response.status}` };
     }
 
@@ -175,10 +236,7 @@ type ExistingDocResult =
   | { exists: true; docId: string; docUrl: string; pdfUrl: string; projectFolderId: string }
   | { exists: false };
 
-async function checkExistingDoc(
-  docRecordId: string,
-  requestId: string
-): Promise<ExistingDocResult> {
+async function checkExistingDoc(docRecordId: string, requestId: string): Promise<ExistingDocResult> {
   const base = getAirtableBase();
   const docsTable = process.env.AIRTABLE_DOCS_TABLE || "Docs";
 
@@ -226,7 +284,10 @@ async function writeBackToAirtable(
   }
 
   try {
-    console.log(`[generate-doc][${requestId}] Writing back to Airtable record: ${docRecordId}`, Object.keys(fields));
+    console.log(
+      `[generate-doc][${requestId}] Writing back to Airtable record: ${docRecordId}`,
+      Object.keys(fields)
+    );
     await base(docsTable).update(docRecordId, fields);
     console.log(`[generate-doc][${requestId}] Airtable write-back successful`);
   } catch (error: any) {
@@ -239,12 +300,9 @@ async function writeBackToAirtable(
 
 type TemplateResolutionResult =
   | { ok: true; templateDocId: string; source: "airtable" | "env_fallback" }
-  | { ok: false; error: string; status: 400 | 500 | 502 };
+  | { ok: false; error: string };
 
-async function resolveTemplateDocId(
-  docType: string,
-  requestId: string
-): Promise<TemplateResolutionResult> {
+async function resolveTemplateDocId(docType: string, requestId: string): Promise<TemplateResolutionResult> {
   const apiKey = process.env.AIRTABLE_API_KEY;
   const baseId = process.env.AIRTABLE_BASE_ID;
   const tableName = process.env.AIRTABLE_DOC_TEMPLATES_TABLE || DEFAULT_DOC_TEMPLATES_TABLE;
@@ -253,24 +311,19 @@ async function resolveTemplateDocId(
     // Fall back to env var if Airtable not configured
     const fallbackId = process.env.TEMPLATE_DOC_ID;
     if (fallbackId) {
-      console.log(
-        `[generate-doc][${requestId}] Airtable not configured, using TEMPLATE_DOC_ID fallback`
-      );
+      console.log(`[generate-doc][${requestId}] Airtable not configured, using TEMPLATE_DOC_ID fallback`);
       return { ok: true, templateDocId: fallbackId, source: "env_fallback" };
     }
     return {
       ok: false,
       error: "Airtable not configured and no TEMPLATE_DOC_ID fallback set",
-      status: 500,
     };
   }
 
   const base = new Airtable({ apiKey }).base(baseId);
 
   try {
-    console.log(
-      `[generate-doc][${requestId}] Querying Airtable for template: docType=${docType}`
-    );
+    console.log(`[generate-doc][${requestId}] Querying Airtable for template: docType=${docType}`);
 
     // Query for active default templates matching the doc type
     const records = await base(tableName)
@@ -292,7 +345,6 @@ async function resolveTemplateDocId(
       return {
         ok: false,
         error: `No active default template found for docType: ${docType}`,
-        status: 400,
       };
     }
 
@@ -304,7 +356,6 @@ async function resolveTemplateDocId(
       return {
         ok: false,
         error: `Multiple default templates found for docType: ${docType}. Expected exactly one. Found: ${templateNames}`,
-        status: 500,
       };
     }
 
@@ -313,23 +364,16 @@ async function resolveTemplateDocId(
       return {
         ok: false,
         error: `Template record found but Template Doc ID is empty for docType: ${docType}`,
-        status: 500,
       };
     }
 
-    console.log(
-      `[generate-doc][${requestId}] Resolved template for docType=${docType} → ${templateDocId}`
-    );
+    console.log(`[generate-doc][${requestId}] Resolved template for docType=${docType} → ${templateDocId}`);
     return { ok: true, templateDocId, source: "airtable" };
   } catch (error: any) {
-    console.error(
-      `[generate-doc][${requestId}] Airtable lookup failed:`,
-      error?.message ?? error
-    );
+    console.error(`[generate-doc][${requestId}] Airtable lookup failed:`, error?.message ?? error);
     return {
       ok: false,
       error: `Failed to resolve template from Airtable: ${error?.message ?? "Unknown error"}`,
-      status: 502,
     };
   }
 }
@@ -493,8 +537,9 @@ async function createDocInDrive(
   const appsScriptUrl = process.env.APPS_SCRIPT_DOC_WEBAPP_URL;
 
   if (!appsScriptUrl) {
-    // TODO: Replace with actual Apps Script URL when deployed
-    console.warn(`[generate-doc][${requestId}] APPS_SCRIPT_DOC_WEBAPP_URL not configured, returning stub response`);
+    console.warn(
+      `[generate-doc][${requestId}] APPS_SCRIPT_DOC_WEBAPP_URL not configured, returning stub response`
+    );
     return {
       ok: true,
       docId: "STUB_DOC_ID",
@@ -562,272 +607,260 @@ async function createDocInDrive(
 // --- Main Handler ---
 
 export async function POST(req: Request) {
-  // TEMPORARY: Version check - remove after confirming deployment
-  if (Date.now() > 0) {
-    return new Response(
-      JSON.stringify({ ok: false, debug: { version: "generate-doc_vPERM_001" } }),
-      { status: 418, headers: { "content-type": "application/json" } }
+  const requestId = generateRequestId();
+
+  // Stage: AUTH
+  const authCheck = isAuthorized(req);
+  if (!authCheck.ok) {
+    console.warn(`[generate-doc][${requestId}] Auth failed: ${authCheck.reason}`);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: authCheck.reason,
+        debug: { stage: "AUTH" },
+      },
+      { status: 401 }
     );
   }
 
-  const requestId = generateRequestId();
-
+  // Stage: VALIDATION - Parse body
+  let body: Record<string, unknown>;
   try {
-    // Auth check
-    const authCheck = isAuthorized(req);
-    if (!authCheck.ok) {
-      console.warn(`[generate-doc][${requestId}] Auth failed: ${authCheck.reason}`);
-      return NextResponse.json(
-        { ok: false, error: authCheck.reason, requestId },
-        { status: 401 }
-      );
-    }
+    body = await req.json();
+  } catch (e) {
+    console.error(`[generate-doc][${requestId}] JSON parse error:`, e);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Invalid JSON body",
+        debug: { stage: "VALIDATION", details: "Could not parse request body as JSON" },
+      },
+      { status: 500 }
+    );
+  }
 
-    // Parse body
-    let body: Record<string, unknown>;
-    try {
-      body = await req.json();
-    } catch (e) {
-      console.error(`[generate-doc][${requestId}] JSON parse error:`, e);
-      return NextResponse.json(
-        { ok: false, error: "Invalid JSON body", debug: "Could not parse request body as JSON", requestId },
-        { status: 400 }
-      );
-    }
+  // Log received fields (safe fields only, no sensitive data)
+  const receivedProjectFolderIdRaw = (body.projectFolderId as string) || null;
+  const safeLog = {
+    docRecordId: body.docRecordId ?? "(missing)",
+    projectName: body.projectName ?? "(missing)",
+    clientName: body.clientName ?? "(missing)",
+    docType: body.docType ?? "(missing)",
+    hasProjectFolderId: !!body.projectFolderId,
+    projectFolderIdRaw: receivedProjectFolderIdRaw,
+    hasSourceNotes: !!body.sourceNotes,
+  };
+  console.log(`[generate-doc][${requestId}] Received request:`, safeLog);
 
-    // Log received fields (safe fields only, no sensitive data)
-    const safeLog = {
-      docRecordId: body.docRecordId ?? "(missing)",
-      projectName: body.projectName ?? "(missing)",
-      clientName: body.clientName ?? "(missing)",
-      docType: body.docType ?? "(missing)",
-      hasProjectFolderId: !!body.projectFolderId,
-      hasSourceNotes: !!body.sourceNotes,
-    };
-    console.log(`[generate-doc][${requestId}] Received request:`, safeLog);
-
-    // Validate input
-    const parseResult = InputSchema.safeParse(body);
-    if (!parseResult.success) {
-      const errors = parseResult.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
-      const firstError = parseResult.error.errors[0];
-      const missingField = firstError?.path?.[0] || "unknown";
-      console.warn(`[generate-doc][${requestId}] Validation failed:`, errors);
-      return NextResponse.json(
-        {
-          ok: false,
-          error: `Missing or invalid field: ${missingField}`,
+  // Stage: VALIDATION - Validate input schema
+  const parseResult = InputSchema.safeParse(body);
+  if (!parseResult.success) {
+    const errors = parseResult.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
+    const firstError = parseResult.error.errors[0];
+    const missingField = firstError?.path?.[0] || "unknown";
+    console.warn(`[generate-doc][${requestId}] Validation failed:`, errors);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `Missing or invalid field: ${missingField}`,
+        debug: {
+          stage: "VALIDATION",
           details: errors,
           received: safeLog,
-          debug: "Request validation failed",
-          requestId,
         },
-        { status: 400 }
-      );
-    }
+      },
+      { status: 500 }
+    );
+  }
 
-    const input = parseResult.data;
-    const docRecordId = input.docRecordId; // Already trimmed/normalized by schema
-    const receivedProjectFolderId = input.projectFolderId || null;
-    console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
+  const input = parseResult.data;
+  const docRecordId = input.docRecordId;
 
-    // Idempotency check: if doc already exists, return it
-    if (docRecordId) {
-      const existingDoc = await checkExistingDoc(docRecordId, requestId);
-      if (existingDoc.exists) {
-        console.log(`[generate-doc][${requestId}] Returning existing doc (idempotency)`);
-        return NextResponse.json({
-          ok: true,
-          docRecordId,
-          docId: existingDoc.docId,
-          docUrl: existingDoc.docUrl,
-          pdfUrl: existingDoc.pdfUrl,
-          projectFolderId: existingDoc.projectFolderId,
+  // Normalize folder ID (extract from URL if needed)
+  const receivedProjectFolderId = input.projectFolderId || null;
+  const normalizedFolderId = normalizeFolderId(receivedProjectFolderId);
+
+  console.log(
+    `[generate-doc][${requestId}] Folder ID normalization: received="${receivedProjectFolderId}" → normalized="${normalizedFolderId}"`
+  );
+  console.log(`[generate-doc][${requestId}] Processing request for project: ${input.projectName}`);
+
+  // Idempotency check: if doc already exists, return it
+  if (docRecordId) {
+    const existingDoc = await checkExistingDoc(docRecordId, requestId);
+    if (existingDoc.exists) {
+      console.log(`[generate-doc][${requestId}] Returning existing doc (idempotency)`);
+      return NextResponse.json({
+        ok: true,
+        docRecordId,
+        docId: existingDoc.docId,
+        docUrl: existingDoc.docUrl,
+        pdfUrl: existingDoc.pdfUrl,
+        projectFolderId: existingDoc.projectFolderId,
+        folderCreated: false,
+        debug: {
+          receivedProjectFolderId,
+          usedProjectFolderId: existingDoc.projectFolderId,
           folderCreated: false,
           reusedExisting: true,
-          debug: {
-            message: "Reused existing doc",
-            receivedProjectFolderId,
-            usedProjectFolderId: existingDoc.projectFolderId,
-            folderCreated: false,
-          },
-          requestId,
-        });
-      }
+        },
+      });
     }
+  }
 
-    // Resolve project folder (create if missing)
-    let projectFolderId = receivedProjectFolderId || "";
-    let folderCreated = false;
+  // Stage: FOLDER_CREATE - Resolve or create project folder
+  let projectFolderId = normalizedFolderId || "";
+  let folderCreated = false;
 
-    if (!projectFolderId) {
-      console.log(`[generate-doc][${requestId}] projectFolderId missing, creating folder automatically`);
+  if (!projectFolderId) {
+    console.log(`[generate-doc][${requestId}] projectFolderId missing/invalid, creating folder automatically`);
 
-      const folderResult = await createProjectFolder(
-        input.clientName,
-        input.projectName,
-        requestId
-      );
+    const folderResult = await createProjectFolder(input.clientName, input.projectName, requestId);
 
-      if (!folderResult.ok) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error: `Failed to create project folder: ${folderResult.error}`,
-            debug: {
-              message: "Folder creation failed",
-              receivedProjectFolderId,
-              folderError: folderResult.error,
-            },
-            requestId,
-          },
-          { status: 502 }
-        );
-      }
-
-      projectFolderId = folderResult.folderId;
-      folderCreated = true;
-
-      // Best-effort write-back folder ID to Airtable
-      if (docRecordId) {
-        await writeBackToAirtable(docRecordId, { "Project Folder ID": projectFolderId }, requestId);
-      }
-    }
-
-    // Generate content via OpenAI
-    let content: GeneratedContent;
-    try {
-      content = await generateStructuredContent(input, requestId);
-    } catch (error: any) {
-      console.error(`[generate-doc][${requestId}] OpenAI generation failed:`, error);
+    if (!folderResult.ok) {
       return NextResponse.json(
         {
           ok: false,
-          error: `Content generation failed: ${error.message}`,
+          error: `Failed to create project folder: ${folderResult.error}`,
           debug: {
-            message: "OpenAI error",
+            stage: "FOLDER_CREATE",
+            details: folderResult.error,
             receivedProjectFolderId,
-            usedProjectFolderId: projectFolderId,
-            folderCreated,
-            openaiError: error.message,
+            normalizedFolderId,
           },
-          requestId,
         },
         { status: 500 }
       );
     }
 
-    // Resolve template from Airtable (or fallback)
-    const templateResult = await resolveTemplateDocId(input.docType, requestId);
-    if (!templateResult.ok) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: templateResult.error,
-          debug: {
-            message: "Template lookup failed",
-            receivedProjectFolderId,
-            usedProjectFolderId: projectFolderId,
-            folderCreated,
-          },
-          requestId,
-        },
-        { status: templateResult.status }
-      );
+    projectFolderId = folderResult.folderId;
+    folderCreated = true;
+
+    // Best-effort write-back folder ID to Airtable
+    if (docRecordId) {
+      await writeBackToAirtable(docRecordId, { "Project Folder ID": projectFolderId }, requestId);
     }
-    const templateDocId = templateResult.templateDocId;
+  }
 
-    // Create doc in Drive via Apps Script
-    const docResult = await createDocInDrive(
-      content,
-      projectFolderId,
-      templateDocId,
-      requestId
-    );
-
-    if (!docResult.ok) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: docResult.error,
-          debug: {
-            message: "Apps Script doc creation failed",
-            receivedProjectFolderId,
-            usedProjectFolderId: projectFolderId,
-            folderCreated,
-            appsScriptError: docResult.error,
-          },
-          requestId,
-        },
-        { status: 502 }
-      );
-    }
-
-    // Best-effort write-back doc info to Airtable
-    if (docRecordId && docResult.docId && docResult.docUrl) {
-      const writeBackFields: Record<string, string> = {
-        "Doc ID": docResult.docId,
-        "Doc URL": docResult.docUrl,
-        "Project Folder ID": projectFolderId,
-      };
-      if (docResult.pdfUrl) {
-        writeBackFields["PDF URL"] = docResult.pdfUrl;
-      }
-      await writeBackToAirtable(docRecordId, writeBackFields, requestId);
-    }
-
-    return NextResponse.json({
-      ok: true,
-      docRecordId: docRecordId || null,
-      docId: docResult.docId,
-      docUrl: docResult.docUrl,
-      pdfUrl: docResult.pdfUrl || "",
-      projectFolderId,
-      folderCreated,
-      reusedExisting: false,
-      debug: {
-        message: folderCreated ? "Created folder and doc" : "Created doc in existing folder",
-        receivedProjectFolderId,
-        usedProjectFolderId: projectFolderId,
-        folderCreated,
-      },
-      requestId,
-    });
+  // Stage: DOC_CREATE - Generate content via OpenAI
+  let content: GeneratedContent;
+  try {
+    content = await generateStructuredContent(input, requestId);
   } catch (error: any) {
-    console.error(`[generate-doc][${requestId}] Unexpected error:`, error);
+    console.error(`[generate-doc][${requestId}] OpenAI generation failed:`, error);
     return NextResponse.json(
       {
         ok: false,
-        error: error?.message ?? "Unknown error",
+        error: `Content generation failed: ${error.message}`,
         debug: {
-          message: "Unexpected error",
-          errorStack: error?.stack?.slice(0, 500),
+          stage: "DOC_CREATE",
+          details: error.message,
+          receivedProjectFolderId,
+          usedProjectFolderId: projectFolderId,
+          folderCreated,
         },
-        requestId,
       },
       { status: 500 }
     );
   }
+
+  // Stage: DOC_CREATE - Resolve template from Airtable (or fallback)
+  const templateResult = await resolveTemplateDocId(input.docType, requestId);
+  if (!templateResult.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: templateResult.error,
+        debug: {
+          stage: "DOC_CREATE",
+          details: "Template lookup failed: " + templateResult.error,
+          receivedProjectFolderId,
+          usedProjectFolderId: projectFolderId,
+          folderCreated,
+        },
+      },
+      { status: 500 }
+    );
+  }
+  const templateDocId = templateResult.templateDocId;
+
+  // Stage: DOC_CREATE - Create doc in Drive via Apps Script
+  const docResult = await createDocInDrive(content, projectFolderId, templateDocId, requestId);
+
+  if (!docResult.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: docResult.error,
+        debug: {
+          stage: "DOC_CREATE",
+          details: docResult.error,
+          receivedProjectFolderId,
+          usedProjectFolderId: projectFolderId,
+          folderCreated,
+        },
+      },
+      { status: 500 }
+    );
+  }
+
+  // Ensure we have the required doc info
+  if (!docResult.docId || !docResult.docUrl) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Doc creation succeeded but missing docId or docUrl",
+        debug: {
+          stage: "DOC_CREATE",
+          details: { docId: docResult.docId, docUrl: docResult.docUrl },
+          receivedProjectFolderId,
+          usedProjectFolderId: projectFolderId,
+          folderCreated,
+        },
+      },
+      { status: 500 }
+    );
+  }
+
+  // Best-effort write-back doc info to Airtable
+  if (docRecordId) {
+    const writeBackFields: Record<string, string> = {
+      "Doc ID": docResult.docId,
+      "Doc URL": docResult.docUrl,
+      "Project Folder ID": projectFolderId,
+    };
+    if (docResult.pdfUrl) {
+      writeBackFields["PDF URL"] = docResult.pdfUrl;
+    }
+    await writeBackToAirtable(docRecordId, writeBackFields, requestId);
+  }
+
+  // Success response
+  return NextResponse.json({
+    ok: true,
+    docRecordId: docRecordId || "",
+    projectFolderId,
+    folderCreated,
+    docId: docResult.docId,
+    docUrl: docResult.docUrl,
+    pdfUrl: docResult.pdfUrl || "",
+    debug: {
+      receivedProjectFolderId,
+      usedProjectFolderId: projectFolderId,
+      folderCreated,
+    },
+  });
 }
 
 // Reject non-POST requests
 export async function GET() {
-  return NextResponse.json(
-    { ok: false, error: "Method not allowed. Use POST." },
-    { status: 405 }
-  );
+  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST." }, { status: 405 });
 }
 
 export async function PUT() {
-  return NextResponse.json(
-    { ok: false, error: "Method not allowed. Use POST." },
-    { status: 405 }
-  );
+  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST." }, { status: 405 });
 }
 
 export async function DELETE() {
-  return NextResponse.json(
-    { ok: false, error: "Method not allowed. Use POST." },
-    { status: 405 }
-  );
+  return NextResponse.json({ ok: false, error: "Method not allowed. Use POST." }, { status: 405 });
 }
