@@ -3,7 +3,7 @@ import { z } from "zod";
 import Airtable from "airtable";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2026-01-16-1230";
+const BUILD_TAG = "generate-doc-2026-01-17-direct-placeholders";
 
 /**
  * POST /api/generate-doc
@@ -121,12 +121,43 @@ function coerceRequestBody(body: Record<string, unknown>): Record<string, unknow
     "sourceNotes",
     "polishNotes",
     "projectFolderId",
+    // Structured input fields
+    "docTitleOverride",
+    "docSubtitle",
+    "docInputOverview",
+    "docInputGoals",
+    "docInputStrategy",
+    "docInputPlan",
+    "docInputNextSteps",
+    "docInputRawPaste",
+    // Direct placeholder fields (from Airtable Automation)
+    "project",
+    "client",
+    "header",
+    "shortOverview",
+    "content",
+    "templateId",
+    "destinationFolderId",
+    "generatedAt",
   ];
 
   for (const field of fieldsToCoerce) {
     if (field in body) {
       coerced[field] = coerceToString(body[field]);
     }
+  }
+
+  // Also coerce nested docInputs object if present
+  if (body.docInputs && typeof body.docInputs === "object") {
+    const nestedInputs = body.docInputs as Record<string, unknown>;
+    const coercedInputs: Record<string, unknown> = {};
+    const nestedFields = ["overview", "goals", "strategy", "plan", "nextSteps", "rawPaste"];
+    for (const field of nestedFields) {
+      if (field in nestedInputs) {
+        coercedInputs[field] = coerceToString(nestedInputs[field]);
+      }
+    }
+    coerced.docInputs = coercedInputs;
   }
 
   return coerced;
@@ -144,12 +175,32 @@ const optionalString = z
 
 const InputSchema = z.object({
   docRecordId: optionalString,
-  projectName: z.string().min(1, "projectName is required"),
-  clientName: z.string().min(1, "clientName is required"),
-  docType: z.string().min(1, "docType is required"),
-  sourceNotes: z.string().min(1, "sourceNotes is required"),
+  projectName: optionalString, // Now optional for direct placeholder mode
+  clientName: optionalString,  // Now optional for direct placeholder mode
+  docType: optionalString,     // Now optional for direct placeholder mode
+  sourceNotes: optionalString, // Now optional - can be built from structured inputs
   polishNotes: optionalString, // Optional additional instructions for polish
   projectFolderId: optionalString, // IGNORED for placement - always use PREPARED_DOCUMENTS_FOLDER_ID
+
+  // Structured input fields (override title/subtitle, or provide section content)
+  docTitleOverride: optionalString,
+  docSubtitle: optionalString,
+  docInputOverview: optionalString,
+  docInputGoals: optionalString,
+  docInputStrategy: optionalString,
+  docInputPlan: optionalString,
+  docInputNextSteps: optionalString,
+  docInputRawPaste: optionalString,
+
+  // Direct placeholder fields (from Airtable Automation - bypasses GPT polish)
+  project: optionalString,          // Maps to {{PROJECT}}
+  client: optionalString,           // Maps to {{CLIENT}}
+  header: optionalString,           // Maps to {{HEADER}}
+  shortOverview: optionalString,    // Maps to {{SHORT_OVERVIEW}}
+  content: optionalString,          // Maps to {{CONTENT}} (direct, no GPT)
+  templateId: optionalString,       // Override template selection
+  destinationFolderId: optionalString, // Override destination folder
+  generatedAt: optionalString,      // Override generated timestamp
 });
 
 // GPT Polish output schema (strict)
@@ -164,6 +215,13 @@ type PolishOutput = z.infer<typeof PolishOutputSchema>;
 // =============================================================================
 // HELPERS
 // =============================================================================
+
+/**
+ * Checks if a value is a non-empty string with meaningful content.
+ */
+function hasMeaningfulText(val: unknown): val is string {
+  return typeof val === "string" && val.trim().length > 0;
+}
 
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -198,6 +256,73 @@ function isAuthorized(req: Request): { ok: true } | { ok: false; reason: string 
   }
 
   return { ok: true };
+}
+
+// =============================================================================
+// STRUCTURED INPUT BUILDER
+// =============================================================================
+
+interface StructuredInputs {
+  overview?: string | null;
+  goals?: string | null;
+  strategy?: string | null;
+  plan?: string | null;
+  nextSteps?: string | null;
+  rawPaste?: string | null;
+}
+
+/**
+ * Builds a sourceText string from structured input fields.
+ * Each non-empty field becomes a section with a markdown header.
+ *
+ * @returns { text: string, usedFields: string[] }
+ */
+function buildSourceText(inputs: StructuredInputs): { text: string; usedFields: string[] } {
+  const sections: { label: string; key: keyof StructuredInputs; content: string }[] = [];
+  const usedFields: string[] = [];
+
+  const fieldMappings: { key: keyof StructuredInputs; label: string }[] = [
+    { key: "overview", label: "Overview" },
+    { key: "goals", label: "Goals" },
+    { key: "strategy", label: "Strategy" },
+    { key: "plan", label: "Plan" },
+    { key: "nextSteps", label: "Next Steps" },
+    { key: "rawPaste", label: "Additional Notes" },
+  ];
+
+  for (const { key, label } of fieldMappings) {
+    const val = inputs[key];
+    if (hasMeaningfulText(val)) {
+      sections.push({ label, key, content: val.trim() });
+      usedFields.push(key);
+    }
+  }
+
+  if (sections.length === 0) {
+    return { text: "", usedFields: [] };
+  }
+
+  const text = sections.map(({ label, content }) => `## ${label}\n${content}`).join("\n\n");
+
+  return { text, usedFields };
+}
+
+/**
+ * Extracts structured inputs from body, supporting:
+ * - Flat fields: docInputOverview, docInputGoals, etc.
+ * - Nested object: body.docInputs.overview, body.docInputs.goals, etc.
+ */
+function extractStructuredInputs(body: Record<string, unknown>): StructuredInputs {
+  const docInputs = (body.docInputs as Record<string, unknown>) || {};
+
+  return {
+    overview: coerceToString(body.docInputOverview) ?? coerceToString(docInputs.overview) ?? null,
+    goals: coerceToString(body.docInputGoals) ?? coerceToString(docInputs.goals) ?? null,
+    strategy: coerceToString(body.docInputStrategy) ?? coerceToString(docInputs.strategy) ?? null,
+    plan: coerceToString(body.docInputPlan) ?? coerceToString(docInputs.plan) ?? null,
+    nextSteps: coerceToString(body.docInputNextSteps) ?? coerceToString(docInputs.nextSteps) ?? null,
+    rawPaste: coerceToString(body.docInputRawPaste) ?? coerceToString(docInputs.rawPaste) ?? null,
+  };
 }
 
 // =============================================================================
@@ -391,7 +516,9 @@ Return ONLY the JSON object with title, subtitle, and content. No code fences or
 /**
  * Calls Apps Script to:
  * 1. Copy the template doc to the destination folder
- * 2. Replace placeholders: {{TITLE}}, {{SUBTITLE}}, {{GENERATED_AT}}, {{CONTENT}}
+ * 2. Replace placeholders (supports both legacy and new):
+ *    - Legacy: {{TITLE}}, {{SUBTITLE}}, {{GENERATED_AT}}, {{CONTENT}}
+ *    - New: {{PROJECT}}, {{HEADER}}, {{SHORT_OVERVIEW}}, {{CONTENT}}
  * 3. Return docId, docUrl, pdfUrl
  */
 async function createDocFromTemplate(
@@ -403,6 +530,11 @@ async function createDocFromTemplate(
     generatedAt: string;
     content: string;
     docName: string; // Name for the new doc file
+    // New placeholder params
+    project?: string | null;
+    client?: string | null;
+    header?: string | null;
+    shortOverview?: string | null;
   },
   requestId: string
 ): Promise<{ ok: true; docId: string; docUrl: string; pdfUrl: string } | { ok: false; error: string }> {
@@ -412,16 +544,25 @@ async function createDocFromTemplate(
     return { ok: false, error: "APPS_SCRIPT_DOC_WEBAPP_URL not configured" };
   }
 
+  // Build placeholders object with both legacy and new placeholders
+  const contentValue = params.content || " "; // Single space if empty to avoid replacement issues
+
   const payload = {
     action: "createFromTemplate",
     templateDocId: params.templateDocId,
     destinationFolderId: params.destinationFolderId,
     docName: params.docName,
     placeholders: {
-      "{{TITLE}}": params.title,
-      "{{SUBTITLE}}": params.subtitle || "",
+      // New placeholders (from Airtable Automation)
+      "{{PROJECT}}": params.project || params.title || "",
+      "{{CLIENT}}": params.client || "",
+      "{{HEADER}}": params.header || "",
+      "{{SHORT_OVERVIEW}}": params.shortOverview || "",
+      "{{CONTENT}}": contentValue,
+      // Legacy placeholders (backward compatibility)
       "{{GENERATED_AT}}": params.generatedAt || "",
-      "{{CONTENT}}": params.content || " ", // Single space if empty to avoid replacement issues
+      "{{TITLE}}": params.title || "",
+      "{{SUBTITLE}}": params.subtitle || "",
     },
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
@@ -524,9 +665,17 @@ export async function POST(req: Request) {
   );
 
   // ---------------------------------------------------------------------------
-  // FOLDER RESOLUTION: PREPARED_DOCUMENTS_FOLDER_ID > projectFolderId
+  // MODE DETECTION: Direct placeholders vs GPT polish
+  // Direct mode: when content field is provided (from Airtable Automation)
+  // ---------------------------------------------------------------------------
+  const isDirectMode = !!input.content;
+  console.log(`[generate-doc][${requestId}] Mode: ${isDirectMode ? "DIRECT" : "GPT"}`);
+
+  // ---------------------------------------------------------------------------
+  // FOLDER RESOLUTION: input.destinationFolderId > PREPARED_DOCUMENTS_FOLDER_ID > projectFolderId
   // ---------------------------------------------------------------------------
   const destinationFolderId =
+    input.destinationFolderId?.trim() ||
     process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim() ||
     input.projectFolderId?.trim() ||
     null;
@@ -537,7 +686,7 @@ export async function POST(req: Request) {
       {
         ok: false,
         status: 500,
-        error: "No destination folder. Set PREPARED_DOCUMENTS_FOLDER_ID env var.",
+        error: "No destination folder. Provide destinationFolderId or set PREPARED_DOCUMENTS_FOLDER_ID env var.",
         build: BUILD_TAG,
         debug: { stage: "FOLDER" },
       },
@@ -545,17 +694,21 @@ export async function POST(req: Request) {
     );
   }
 
-  const folderSource = process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim() ? "env" : "payload";
+  const folderSource = input.destinationFolderId?.trim()
+    ? "payload"
+    : process.env.PREPARED_DOCUMENTS_FOLDER_ID?.trim()
+      ? "env"
+      : "projectFolderId";
   console.log(`[generate-doc][${requestId}] Destination folder: ${destinationFolderId} (source: ${folderSource})`);
 
   // Backwards-compat shim: set projectFolderId so legacy helpers pass validation
   (body as Record<string, unknown>).projectFolderId = destinationFolderId;
 
   // ---------------------------------------------------------------------------
-  // TEMPLATE SELECTION
+  // TEMPLATE SELECTION: input.templateId > docType-based selection
   // ---------------------------------------------------------------------------
-  const templateDocId = selectTemplateId(input.docType);
-  console.log(`[generate-doc][${requestId}] Template: ${templateDocId} (docType="${input.docType}")`);
+  const templateDocId = input.templateId?.trim() || selectTemplateId(input.docType || "");
+  console.log(`[generate-doc][${requestId}] Template: ${templateDocId} (source: ${input.templateId ? "payload" : "docType"})`);
 
   // ---------------------------------------------------------------------------
   // IDEMPOTENCY CHECK
@@ -576,39 +729,114 @@ export async function POST(req: Request) {
   }
 
   // ---------------------------------------------------------------------------
-  // GPT POLISH
+  // PREPARE PLACEHOLDER VALUES
   // ---------------------------------------------------------------------------
-  const polishResult = await gptPolish(
-    {
-      docType: input.docType,
-      clientName: input.clientName,
-      projectName: input.projectName,
-      generatedAt,
-      sourceNotes: input.sourceNotes,
-      polishNotes: input.polishNotes,
-    },
-    requestId
-  );
+  let finalTitle: string;
+  let finalSubtitle: string;
+  let finalContent: string;
+  let finalProject: string | null = null;
+  let finalClient: string | null = null;
+  let finalHeader: string | null = null;
+  let finalShortOverview: string | null = null;
+  let sourceType: string;
+  let inputsUsed: string[] = [];
 
-  if (!polishResult.ok) {
-    console.error(`[generate-doc][${requestId}] GPT polish failed: ${polishResult.error}`);
-    return NextResponse.json(
-      {
-        ok: false,
-        status: 500,
-        error: polishResult.error,
-        build: BUILD_TAG,
-        debug: { stage: "GPT_POLISH", raw: polishResult.raw?.slice(0, 300) },
-      },
-      { status: 500 }
+  // Use input.generatedAt if provided, otherwise use generated timestamp
+  const finalGeneratedAt = input.generatedAt?.trim() || generatedAt;
+
+  if (isDirectMode) {
+    // ---------------------------------------------------------------------------
+    // DIRECT MODE: Use provided placeholders directly (skip GPT)
+    // ---------------------------------------------------------------------------
+    finalProject = input.project || null;
+    finalClient = input.client || null;
+    finalHeader = input.header || null;
+    finalShortOverview = input.shortOverview || null;
+    finalContent = input.content || " ";
+
+    // Title: use project as title fallback
+    finalTitle = input.project || "Untitled Document";
+    finalSubtitle = input.header || "";
+    sourceType = "direct";
+
+    console.log(
+      `[generate-doc][${requestId}] Direct mode: project="${finalProject}", client="${finalClient}", header="${finalHeader?.slice(0, 50)}..."`
     );
+  } else {
+    // ---------------------------------------------------------------------------
+    // GPT MODE: Process source text through GPT polish
+    // ---------------------------------------------------------------------------
+    const structuredInputs = extractStructuredInputs(body);
+    const { text: builtSourceText, usedFields } = buildSourceText(structuredInputs);
+    inputsUsed = usedFields;
+
+    // Priority: built structured text > sourceNotes
+    const finalSourceText = builtSourceText || input.sourceNotes || null;
+
+    if (!finalSourceText) {
+      console.error(`[generate-doc][${requestId}] No source content provided`);
+      return NextResponse.json(
+        {
+          ok: false,
+          status: 400,
+          error: "No source content. Provide sourceNotes, structured inputs, or direct content field.",
+          build: BUILD_TAG,
+          debug: { stage: "SOURCE_TEXT" },
+        },
+        { status: 400 }
+      );
+    }
+
+    sourceType = builtSourceText ? "structured" : "sourceNotes";
+    console.log(
+      `[generate-doc][${requestId}] Source: type=${sourceType}${inputsUsed.length ? `, fields=[${inputsUsed.join(", ")}]` : ""}`
+    );
+
+    // ---------------------------------------------------------------------------
+    // GPT POLISH
+    // ---------------------------------------------------------------------------
+    const polishResult = await gptPolish(
+      {
+        docType: input.docType || "Document",
+        clientName: input.clientName || "Client",
+        projectName: input.projectName || "Project",
+        generatedAt: finalGeneratedAt,
+        sourceNotes: finalSourceText,
+        polishNotes: input.polishNotes,
+      },
+      requestId
+    );
+
+    if (!polishResult.ok) {
+      console.error(`[generate-doc][${requestId}] GPT polish failed: ${polishResult.error}`);
+      return NextResponse.json(
+        {
+          ok: false,
+          status: 500,
+          error: polishResult.error,
+          build: BUILD_TAG,
+          debug: { stage: "GPT_POLISH", raw: polishResult.raw?.slice(0, 300) },
+        },
+        { status: 500 }
+      );
+    }
+
+    const polished = polishResult.data;
+
+    // Title priority: docTitleOverride > GPT title > fallback
+    const fallbackTitle = `${input.clientName || "Client"} — ${input.docType || "Document"} (${input.projectName || "Project"})`;
+    finalTitle = input.docTitleOverride?.trim() || polished.title.trim() || fallbackTitle;
+
+    // Subtitle priority: docSubtitle > GPT subtitle
+    finalSubtitle = input.docSubtitle?.trim() || polished.subtitle || "";
+
+    // Content from GPT
+    finalContent = polished.content;
+
+    // For backward compat, also set project/client placeholders from legacy fields
+    finalProject = input.projectName || null;
+    finalClient = input.clientName || null;
   }
-
-  const polished = polishResult.data;
-
-  // Fallback title if GPT returned empty
-  const finalTitle =
-    polished.title.trim() || `${input.clientName} — ${input.docType} (${input.projectName})`;
 
   // Doc file name (for Drive)
   const docName = `${finalTitle} — ${new Date().toLocaleDateString("en-US", { timeZone: "America/Los_Angeles" })}`;
@@ -621,10 +849,15 @@ export async function POST(req: Request) {
       templateDocId,
       destinationFolderId,
       title: finalTitle,
-      subtitle: polished.subtitle,
-      generatedAt,
-      content: polished.content,
+      subtitle: finalSubtitle,
+      generatedAt: finalGeneratedAt,
+      content: finalContent,
       docName,
+      // New placeholders
+      project: finalProject,
+      client: finalClient,
+      header: finalHeader,
+      shortOverview: finalShortOverview,
     },
     requestId
   );
@@ -674,6 +907,8 @@ export async function POST(req: Request) {
       templateDocId,
       destinationFolderId,
       title: finalTitle.slice(0, 100),
+      sourceType,
+      inputsUsed: inputsUsed.length > 0 ? inputsUsed : undefined,
     },
   });
 }
