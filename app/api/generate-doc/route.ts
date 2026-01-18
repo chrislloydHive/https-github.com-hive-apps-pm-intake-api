@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import Airtable from "airtable";
+import { google } from "googleapis";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2026-01-17-inline-table";
+const BUILD_TAG = "generate-doc-2026-01-18-docs-api-replace";
 
 /**
  * POST /api/generate-doc
@@ -22,6 +23,8 @@ const BUILD_TAG = "generate-doc-2026-01-17-inline-table";
  * - APPS_SCRIPT_DOC_WEBAPP_URL: Google Apps Script URL for doc creation
  * - PM_INTAKE_SHARED_SECRET: Shared secret for x-hive-secret header auth
  * - PREPARED_DOCUMENTS_FOLDER_ID: Shared Drive folder ID for all generated docs
+ * - GOOGLE_SERVICE_ACCOUNT_EMAIL: Service account email for Google APIs
+ * - GOOGLE_PRIVATE_KEY: Service account private key (PEM format)
  *
  * OPTIONAL ENV VARS:
  * - AIRTABLE_API_KEY: For template lookup fallback and write-back
@@ -148,6 +151,11 @@ function coerceRequestBody(body: Record<string, unknown>): Record<string, unknow
     "templateDocId",
     "destinationFolderId",
     "generatedAt",
+    // Additional merge fields
+    "projectNumber",
+    "startDate",
+    "dueDate",
+    "subtitle",
   ];
 
   for (const field of fieldsToCoerce) {
@@ -213,6 +221,11 @@ const InputSchema = z.object({
   templateDocId: optionalString,    // Alias for templateId
   destinationFolderId: optionalString, // Override destination folder
   generatedAt: optionalString,      // Override generated timestamp
+  // Additional merge fields
+  projectNumber: optionalString,    // Maps to {{PROJECT_NUMBER}}
+  startDate: optionalString,        // Maps to {{START_DATE}}
+  dueDate: optionalString,          // Maps to {{DUE_DATE}}
+  subtitle: optionalString,         // Maps to {{SUBTITLE}}
 });
 
 // GPT Polish output schema (strict)
@@ -522,6 +535,124 @@ Return ONLY the JSON object with title, subtitle, and content. No code fences or
 }
 
 // =============================================================================
+// GOOGLE DOCS API - PLACEHOLDER REPLACEMENT
+// =============================================================================
+
+/**
+ * Gets authenticated Google API clients (Docs + Drive).
+ * Uses service account credentials from environment variables.
+ */
+function getGoogleClients() {
+  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+  if (!email || !privateKey) {
+    return null;
+  }
+
+  const auth = new google.auth.JWT({
+    email,
+    key: privateKey,
+    scopes: [
+      "https://www.googleapis.com/auth/documents",
+      "https://www.googleapis.com/auth/drive",
+    ],
+  });
+
+  return {
+    docs: google.docs({ version: "v1", auth }),
+    drive: google.drive({ version: "v3", auth }),
+  };
+}
+
+/**
+ * Replaces all placeholders in a Google Doc using the Docs API.
+ * Supports both {{KEY}} format placeholders.
+ *
+ * @param documentId - The Google Doc ID
+ * @param placeholders - Map of placeholder key to replacement value
+ * @param requestId - For logging
+ */
+async function replaceDocPlaceholders(
+  documentId: string,
+  placeholders: Record<string, string>,
+  requestId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const clients = getGoogleClients();
+
+  if (!clients) {
+    console.warn(`[generate-doc][${requestId}] Google API credentials not configured - skipping direct replacement`);
+    return { ok: true }; // Not a fatal error - Apps Script may have done it
+  }
+
+  // Build batchUpdate requests for each placeholder
+  const requests = Object.entries(placeholders).map(([key, value]) => ({
+    replaceAllText: {
+      containsText: {
+        text: key, // Already in {{KEY}} format
+        matchCase: true,
+      },
+      replaceText: value == null ? "" : String(value),
+    },
+  }));
+
+  if (requests.length === 0) {
+    console.log(`[generate-doc][${requestId}] No placeholders to replace`);
+    return { ok: true };
+  }
+
+  try {
+    console.log(`[generate-doc][${requestId}] Replacing ${requests.length} placeholders via Docs API`);
+
+    const response = await clients.docs.documents.batchUpdate({
+      documentId,
+      requestBody: { requests },
+    });
+
+    const repliesCount = response.data.replies?.length || 0;
+    console.log(`[generate-doc][${requestId}] Docs API batchUpdate complete: ${repliesCount} replacements processed`);
+
+    return { ok: true };
+  } catch (error: any) {
+    console.error(`[generate-doc][${requestId}] Docs API batchUpdate failed:`, error?.message);
+    return { ok: false, error: `Docs API replacement failed: ${error?.message}` };
+  }
+}
+
+/**
+ * Renames a Google Doc using the Drive API.
+ *
+ * @param documentId - The Google Doc ID
+ * @param newName - The new document name
+ * @param requestId - For logging
+ */
+async function renameDocument(
+  documentId: string,
+  newName: string,
+  requestId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const clients = getGoogleClients();
+
+  if (!clients) {
+    return { ok: true }; // Not fatal
+  }
+
+  try {
+    await clients.drive.files.update({
+      fileId: documentId,
+      requestBody: { name: newName },
+      supportsAllDrives: true,
+    });
+
+    console.log(`[generate-doc][${requestId}] Document renamed to: ${newName}`);
+    return { ok: true };
+  } catch (error: any) {
+    console.error(`[generate-doc][${requestId}] Drive API rename failed:`, error?.message);
+    return { ok: false, error: `Drive API rename failed: ${error?.message}` };
+  }
+}
+
+// =============================================================================
 // APPS SCRIPT DOC CREATION
 // =============================================================================
 
@@ -549,6 +680,10 @@ async function createDocFromTemplate(
     header?: string | null;
     shortOverview?: string | null;
     inlineTable?: string | null;
+    // Additional placeholder params
+    projectNumber?: string | null;
+    startDate?: string | null;
+    dueDate?: string | null;
   },
   requestId: string
 ): Promise<{ ok: true; docId: string; docUrl: string; pdfUrl: string } | { ok: false; error: string }> {
@@ -571,6 +706,10 @@ async function createDocFromTemplate(
     "{{CONTENT}}": contentValue,
     "{{INLINE_TABLE}}": inlineTableValue,
     "{{GENERATED_AT}}": params.generatedAt || "",
+    // Additional placeholders
+    "{{PROJECT_NUMBER}}": params.projectNumber || "",
+    "{{START_DATE}}": params.startDate || "",
+    "{{DUE_DATE}}": params.dueDate || "",
     // Legacy placeholders (backward compatibility)
     "{{TITLE}}": params.title || "",
     "{{SUBTITLE}}": params.subtitle || "",
@@ -628,6 +767,25 @@ async function createDocFromTemplate(
     }
 
     console.log(`[generate-doc][${requestId}] Doc created: ${result.docId}`);
+
+    // ---------------------------------------------------------------------------
+    // REPLACE PLACEHOLDERS VIA GOOGLE DOCS API (after Apps Script creates doc)
+    // ---------------------------------------------------------------------------
+    const replaceResult = await replaceDocPlaceholders(result.docId, placeholders, requestId);
+    if (!replaceResult.ok) {
+      // Log but don't fail - the doc was created, just placeholders may remain
+      console.warn(`[generate-doc][${requestId}] Placeholder replacement warning: ${replaceResult.error}`);
+    }
+
+    // Rename document if PROJECT is set
+    const projectName = placeholders["{{PROJECT}}"];
+    if (projectName && projectName.trim()) {
+      const renameResult = await renameDocument(result.docId, params.docName || projectName, requestId);
+      if (!renameResult.ok) {
+        console.warn(`[generate-doc][${requestId}] Rename warning: ${renameResult.error}`);
+      }
+    }
+
     return {
       ok: true,
       docId: result.docId,
@@ -890,6 +1048,10 @@ export async function POST(req: Request) {
       header: finalHeader,
       shortOverview: finalShortOverview,
       inlineTable: finalInlineTable,
+      // Additional placeholders
+      projectNumber: input.projectNumber || null,
+      startDate: input.startDate || null,
+      dueDate: input.dueDate || null,
     },
     requestId
   );
