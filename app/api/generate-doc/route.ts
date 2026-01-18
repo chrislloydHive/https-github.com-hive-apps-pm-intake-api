@@ -4,7 +4,7 @@ import Airtable from "airtable";
 import { google } from "googleapis";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2026-01-18-docs-api-replace";
+const BUILD_TAG = "generate-doc-2026-01-18-merge-map";
 
 /**
  * POST /api/generate-doc
@@ -348,6 +348,28 @@ function extractStructuredInputs(body: Record<string, unknown>): StructuredInput
     nextSteps: coerceToString(body.docInputNextSteps) ?? coerceToString(docInputs.nextSteps) ?? null,
     rawPaste: coerceToString(body.docInputRawPaste) ?? coerceToString(docInputs.rawPaste) ?? null,
   };
+}
+
+// =============================================================================
+// MERGE MAP EXTRACTION
+// =============================================================================
+
+function extractMergeMap(rawBody: Record<string, any>): Record<string, string> {
+  const merge =
+    rawBody.mergeFields ||
+    rawBody.fields ||
+    rawBody.replacements ||
+    rawBody.structuredInputs ||
+    {};
+
+  if (!merge || typeof merge !== "object") return {};
+
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(merge)) {
+    const s = coerceToString(v);
+    if (s !== null) out[String(k)] = s;
+  }
+  return out;
 }
 
 // =============================================================================
@@ -829,6 +851,9 @@ export async function POST(req: Request) {
     );
   }
 
+  // Pull canonical merge map BEFORE coercion/zod, so Airtable automation mergeFields works
+  const merge = extractMergeMap(rawBody as Record<string, any>);
+
   const body = coerceRequestBody(rawBody);
   const parseResult = InputSchema.safeParse(body);
 
@@ -851,7 +876,14 @@ export async function POST(req: Request) {
   // MODE DETECTION: Direct placeholders vs GPT polish
   // Direct mode: when content field is provided (from Airtable Automation)
   // ---------------------------------------------------------------------------
-  const isDirectMode = !!input.content;
+  const isDirectMode =
+    hasMeaningfulText(input.content) ||
+    hasMeaningfulText(merge.CONTENT) ||
+    hasMeaningfulText(input.inlineTable) ||
+    hasMeaningfulText(merge.INLINE_TABLE) ||
+    hasMeaningfulText(input.project) ||
+    hasMeaningfulText(merge.PROJECT);
+
   console.log(`[generate-doc][${requestId}] Mode: ${isDirectMode ? "DIRECT" : "GPT"}`);
 
   // ---------------------------------------------------------------------------
@@ -936,15 +968,55 @@ export async function POST(req: Request) {
     // ---------------------------------------------------------------------------
     // DIRECT MODE: Use provided placeholders directly (skip GPT)
     // ---------------------------------------------------------------------------
-    finalProject = input.project || input.projectName || null;
-    finalClient = input.client || input.clientName || null;
-    finalHeader = input.header || null;
-    finalShortOverview = input.shortOverview || null;
-    finalContent = input.content || input.sourceNotes || " ";
+    // Prefer explicit direct fields, then mergeFields, then legacy fields
+    finalProject =
+      input.project ||
+      merge.PROJECT ||
+      input.projectName ||
+      null;
 
-    // Title: use project as title fallback
-    finalTitle = input.project || input.projectName || "Untitled Document";
-    finalSubtitle = input.header || "";
+    finalClient =
+      input.client ||
+      merge.CLIENT ||
+      input.clientName ||
+      null;
+
+    finalHeader =
+      input.header ||
+      merge.HEADER ||
+      null;
+
+    finalShortOverview =
+      input.shortOverview ||
+      merge.SHORT_OVERVIEW ||
+      null;
+
+    finalInlineTable =
+      input.inlineTable ||
+      input.inlineTableText ||
+      merge.INLINE_TABLE ||
+      null;
+
+    // Content: prefer direct content, then merge CONTENT, then sourceNotes, else single space
+    finalContent =
+      input.content ||
+      merge.CONTENT ||
+      input.sourceNotes ||
+      " ";
+
+    // Title/subtitle: prefer merge PROJECT/SUBTITLE if present
+    finalTitle =
+      finalProject ||
+      merge.TITLE || // optional legacy
+      input.projectName ||
+      "Untitled Document";
+
+    finalSubtitle =
+      input.subtitle ||
+      merge.SUBTITLE ||
+      input.header ||
+      "";
+
     sourceType = "direct";
 
     console.log(
@@ -1049,9 +1121,9 @@ export async function POST(req: Request) {
       shortOverview: finalShortOverview,
       inlineTable: finalInlineTable,
       // Additional placeholders
-      projectNumber: input.projectNumber || null,
-      startDate: input.startDate || null,
-      dueDate: input.dueDate || null,
+      projectNumber: input.projectNumber || merge.PROJECT_NUMBER || null,
+      startDate: input.startDate || merge.START_DATE || null,
+      dueDate: input.dueDate || merge.DUE_DATE || null,
     },
     requestId
   );
