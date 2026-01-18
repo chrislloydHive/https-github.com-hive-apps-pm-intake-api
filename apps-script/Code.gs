@@ -57,10 +57,16 @@ function doPost(e) {
     var header = data.header || (structuredInputs && structuredInputs.header) || "";
     var shortOverview = data.shortOverview || (structuredInputs && structuredInputs.shortOverview) || "";
 
-    // FIX: Check multiple sources for content, including placeholders object
+    // FIX: Check many possible field names for content (case-sensitive!)
     var contentText =
-      (typeof data.content === "string" ? data.content : "") ||
-      (typeof data.sourceNotes === "string" ? data.sourceNotes : "") ||
+      asStr_(data.content) ||
+      asStr_(data.Content) ||       // Capital C - Airtable field name
+      asStr_(data.sourceNotes) ||
+      asStr_(data.sourceText) ||
+      asStr_(data.bodyContent) ||
+      asStr_(data.body) ||
+      asStr_(data.text) ||
+      asStr_(data.notes) ||
       (structuredInputs && structuredInputs.content ? String(structuredInputs.content) : "") ||
       (data.placeholders && (data.placeholders["{{CONTENT}}"] || data.placeholders["CONTENT"])) ||
       "";
@@ -75,8 +81,14 @@ function doPost(e) {
 
     // Debug: log content source
     var contentSource = "none";
-    if (typeof data.content === "string" && data.content) contentSource = "data.content";
-    else if (typeof data.sourceNotes === "string" && data.sourceNotes) contentSource = "data.sourceNotes";
+    if (asStr_(data.content)) contentSource = "data.content";
+    else if (asStr_(data.Content)) contentSource = "data.Content";
+    else if (asStr_(data.sourceNotes)) contentSource = "data.sourceNotes";
+    else if (asStr_(data.sourceText)) contentSource = "data.sourceText";
+    else if (asStr_(data.bodyContent)) contentSource = "data.bodyContent";
+    else if (asStr_(data.body)) contentSource = "data.body";
+    else if (asStr_(data.text)) contentSource = "data.text";
+    else if (asStr_(data.notes)) contentSource = "data.notes";
     else if (structuredInputs && structuredInputs.content) contentSource = "structuredInputs.content";
     else if (data.placeholders && data.placeholders["{{CONTENT}}"]) contentSource = "placeholders.CONTENT";
 

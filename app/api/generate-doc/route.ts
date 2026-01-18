@@ -145,6 +145,12 @@ function coerceRequestBody(body: Record<string, unknown>): Record<string, unknow
     "header",
     "shortOverview",
     "content",
+    "Content",  // Capital C - Airtable field name
+    "sourceText",
+    "bodyContent",
+    "body",
+    "text",
+    "notes",
     "inlineTable",
     "inlineTableText",
     "templateId",
@@ -215,6 +221,13 @@ const InputSchema = z.object({
   header: optionalString,           // Maps to {{HEADER}}
   shortOverview: optionalString,    // Maps to {{SHORT_OVERVIEW}}
   content: optionalString,          // Maps to {{CONTENT}} (direct, no GPT)
+  Content: optionalString,          // Capital C - Airtable field name
+  // Content field aliases (different Airtable field names)
+  sourceText: optionalString,       // Alias for content
+  bodyContent: optionalString,      // Alias for content
+  body: optionalString,             // Alias for content
+  text: optionalString,             // Alias for content
+  notes: optionalString,            // Alias for content
   inlineTable: optionalString,      // Maps to {{INLINE_TABLE}}
   inlineTableText: optionalString,  // Fallback for {{INLINE_TABLE}}
   templateId: optionalString,       // Override template selection
@@ -881,6 +894,11 @@ export async function POST(req: Request) {
   // ---------------------------------------------------------------------------
   const isDirectMode =
     hasMeaningfulText(input.content) ||
+    hasMeaningfulText(input.Content) ||  // Capital C - Airtable field name
+    hasMeaningfulText(input.sourceText) ||
+    hasMeaningfulText(input.body) ||
+    hasMeaningfulText(input.text) ||
+    hasMeaningfulText(input.notes) ||
     hasMeaningfulText(merge.CONTENT) ||
     hasMeaningfulText(input.inlineTable) ||
     hasMeaningfulText(merge.INLINE_TABLE) ||
@@ -1005,6 +1023,11 @@ export async function POST(req: Request) {
     // Content: prefer direct content, then merge CONTENT, then sourceNotes, else single space
     finalContent =
       input.content ||
+      input.Content ||      // Capital C - Airtable field name
+      input.sourceText ||
+      input.body ||
+      input.text ||
+      input.notes ||
       merge.CONTENT ||
       input.sourceNotes ||
       " ";
