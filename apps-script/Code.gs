@@ -214,20 +214,26 @@ function createDocFromTemplate_(opts) {
     }
   }
 
-  // TASK 1: Insert {{CONTENT}} using anchor insertion (real paragraphs)
+  // TASK 1: Insert {{CONTENT}} using anchor insertion (real paragraphs) OR remove if empty
   var contentText = String(opts.contentText || "").trim();
   if (contentText) {
     var contentResult = insertContentAtAnchor_(body, "{{CONTENT}}", contentText);
     debug.foundContentAnchor = contentResult.found;
     debug.contentParagraphCountInserted = contentResult.paragraphsInserted;
+  } else {
+    // FIX: Remove {{CONTENT}} placeholder if no content provided
+    removeLeftoverToken_(body, "{{CONTENT}}");
   }
 
-  // TASK 2: Insert {{INLINE_TABLE}} as a real table
+  // TASK 2: Insert {{INLINE_TABLE}} as a real table OR remove placeholder if empty
   var inlineTableText = String(opts.inlineTableText || "").trim();
   if (inlineTableText) {
     var tableResult = insertTableAtAnchor_(body, "{{INLINE_TABLE}}", inlineTableText);
     debug.foundInlineTableAnchor = tableResult.found;
     debug.inlineTableRowsInserted = tableResult.rowsInserted;
+  } else {
+    // FIX: Remove {{INLINE_TABLE}} placeholder if no table content provided
+    removeLeftoverToken_(body, "{{INLINE_TABLE}}");
   }
 
   // TASK 4: Check if header still contains {{PROJECT}} (may be in drawing/text box)

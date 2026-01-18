@@ -888,6 +888,8 @@ export async function POST(req: Request) {
     hasMeaningfulText(merge.PROJECT);
 
   console.log(`[generate-doc][${requestId}] Mode: ${isDirectMode ? "DIRECT" : "GPT"}`);
+  console.log(`[generate-doc][${requestId}] Input fields: content=${!!input.content}, sourceNotes=${!!input.sourceNotes}, project=${!!input.project}, inlineTable=${!!input.inlineTable}`);
+  console.log(`[generate-doc][${requestId}] Merge fields: CONTENT=${!!merge.CONTENT}, PROJECT=${!!merge.PROJECT}`);
 
   // ---------------------------------------------------------------------------
   // FOLDER RESOLUTION: input.destinationFolderId > PREPARED_DOCUMENTS_FOLDER_ID > projectFolderId
