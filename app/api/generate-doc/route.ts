@@ -120,9 +120,28 @@ function coerceToString(val: unknown): string | null {
   return null;
 }
 
+// Placeholder strings that should be treated as empty/null
+const PLACEHOLDER_STRINGS = [
+  "[NO_SOURCE_TEXT_PROVIDED]",
+  "[NO_SOURCE_TEXT]",
+  "[NO_CONTENT]",
+  "[EMPTY]",
+  "[NULL]",
+];
+
+/**
+ * Checks if a value is a placeholder string that should be treated as empty.
+ */
+function isPlaceholderValue(val: unknown): boolean {
+  if (typeof val !== "string") return false;
+  const trimmed = val.trim();
+  return PLACEHOLDER_STRINGS.includes(trimmed);
+}
+
 /**
  * Normalizes payload keys from uppercase (Airtable) to lowercase (internal schema).
  * CONTENT -> content, PROJECT -> project, etc.
+ * Also strips placeholder strings like [NO_SOURCE_TEXT_PROVIDED].
  * Preserves nested objects and arrays.
  */
 function normalizeKeysToLowercase(obj: Record<string, unknown>): Record<string, unknown> {
@@ -131,6 +150,13 @@ function normalizeKeysToLowercase(obj: Record<string, unknown>): Record<string, 
   for (const [key, value] of Object.entries(obj)) {
     // Convert key to lowercase
     const lowerKey = key.toLowerCase();
+
+    // Strip placeholder strings - treat them as empty
+    if (isPlaceholderValue(value)) {
+      result[lowerKey] = "";
+      if (key !== lowerKey) result[key] = "";
+      continue;
+    }
 
     // Handle nested objects (but not arrays)
     if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -377,7 +403,8 @@ function buildSourceText(inputs: StructuredInputs): { text: string; usedFields: 
  * - Nested object: body.docInputs.overview, body.docInputs.goals, etc.
  */
 function extractStructuredInputs(body: Record<string, unknown>): StructuredInputs {
-  const docInputs = (body.docInputs as Record<string, unknown>) || {};
+  // Check both original and normalized (lowercase) key names
+  const docInputs = (body.docInputs || body.docinputs || {}) as Record<string, unknown>;
 
   return {
     overview: coerceToString(body.docInputOverview) ?? coerceToString(docInputs.overview) ?? null,
@@ -394,11 +421,12 @@ function extractStructuredInputs(body: Record<string, unknown>): StructuredInput
 // =============================================================================
 
 function extractMergeMap(rawBody: Record<string, any>): Record<string, string> {
+  // Check both original and normalized (lowercase) key names
   const merge =
-    rawBody.mergeFields ||
+    rawBody.mergeFields || rawBody.mergefields ||
     rawBody.fields ||
     rawBody.replacements ||
-    rawBody.structuredInputs ||
+    rawBody.structuredInputs || rawBody.structuredinputs ||
     {};
 
   if (!merge || typeof merge !== "object") return {};
