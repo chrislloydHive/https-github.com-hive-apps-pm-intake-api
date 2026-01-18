@@ -135,7 +135,7 @@ function doPost(e) {
       data.docName ||
       data.fileName ||
       data.docTitle ||
-      (project ? (project + " — " + (data.docType || "Doc")) : "Generated Document");
+      (project ? (project + " - " + (data.docType || "Doc")) : "Generated Document");
 
     // -----------------------------
     // Create doc from template + replace placeholders
