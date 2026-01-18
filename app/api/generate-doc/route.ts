@@ -43,12 +43,14 @@ const TEMPLATE_IDS = {
   DEFAULT: "1f8Zn0Bd62c1RuvUN1k6YKfrrVkYhH6ugXbW9geh29vo",
   PROJECT_BRIEF: "11PXHM5b8GhR9D2DzuC2ztLOEvV87RXHBSYJkdjuxc_A",
   PROJECT_TIMELINE: "1XTyZXgICgBfupXyhslVn15f8H119j7GPT5wXR2igJvc",
+  SOW: "1waa73z1pGRbvgA9hjSAoyi67lkNs46PqoP3YoXZ_pPU",
 } as const;
 
 /**
  * Maps docType to template ID.
  * - "Project Brief" -> PROJECT_BRIEF template
  * - "Project Timeline" -> PROJECT_TIMELINE template
+ * - "SOW" -> SOW template
  * - Everything else -> DEFAULT template
  */
 function selectTemplateId(docType: string): string {
@@ -62,7 +64,11 @@ function selectTemplateId(docType: string): string {
     return TEMPLATE_IDS.PROJECT_TIMELINE;
   }
 
-  // Default for: Branded Doc, SOW, Analytics Report, Meeting Recap, Strategy Memo, Other, etc.
+  if (normalized === "sow") {
+    return TEMPLATE_IDS.SOW;
+  }
+
+  // Default for: Branded Doc, Analytics Report, Meeting Recap, Strategy Memo, Other, etc.
   return TEMPLATE_IDS.DEFAULT;
 }
 
