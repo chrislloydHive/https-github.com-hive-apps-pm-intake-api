@@ -749,13 +749,16 @@ async function createDocFromTemplate(
     destinationFolderId: params.destinationFolderId,
     projectFolderId: params.projectFolderId || params.destinationFolderId, // Backward compat
     docName: params.docName,
+    // Send content/inlineTable at top level for Apps Script anchor insertion
+    content: params.content || "",
+    inlineTable: params.inlineTable || "",
     placeholders,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
   };
 
   console.log(
-    `[generate-doc][${requestId}] Calling Apps Script: template=${params.templateDocId}, folder=${params.destinationFolderId}`
+    `[generate-doc][${requestId}] Calling Apps Script: template=${params.templateDocId}, folder=${params.destinationFolderId}, contentLength=${params.content?.length || 0}`
   );
 
   try {

@@ -57,10 +57,12 @@ function doPost(e) {
     var header = data.header || (structuredInputs && structuredInputs.header) || "";
     var shortOverview = data.shortOverview || (structuredInputs && structuredInputs.shortOverview) || "";
 
+    // FIX: Check multiple sources for content, including placeholders object
     var contentText =
       (typeof data.content === "string" ? data.content : "") ||
       (typeof data.sourceNotes === "string" ? data.sourceNotes : "") ||
       (structuredInputs && structuredInputs.content ? String(structuredInputs.content) : "") ||
+      (data.placeholders && (data.placeholders["{{CONTENT}}"] || data.placeholders["CONTENT"])) ||
       "";
 
     if (!contentText && data.content && typeof data.content === "object") {
@@ -70,6 +72,13 @@ function doPost(e) {
         asStr_(data.content.body) ||
         "";
     }
+
+    // Debug: log content source
+    var contentSource = "none";
+    if (typeof data.content === "string" && data.content) contentSource = "data.content";
+    else if (typeof data.sourceNotes === "string" && data.sourceNotes) contentSource = "data.sourceNotes";
+    else if (structuredInputs && structuredInputs.content) contentSource = "structuredInputs.content";
+    else if (data.placeholders && data.placeholders["{{CONTENT}}"]) contentSource = "placeholders.CONTENT";
 
     var inlineTableText =
       asStr_(data.inlineTable) ||
@@ -122,6 +131,7 @@ function doPost(e) {
       fileName: docName,
       placeholders: placeholders,
       contentText: contentText,
+      contentSource: contentSource,
       inlineTableText: inlineTableText,
       exportPdf: exportPdf
     });
@@ -160,6 +170,8 @@ function createDocFromTemplate_(opts) {
   var debug = {
     foundContentAnchor: false,
     contentParagraphCountInserted: 0,
+    contentSource: opts.contentSource || "unknown",
+    contentLength: opts.contentText ? opts.contentText.length : 0,
     foundInlineTableAnchor: false,
     inlineTableRowsInserted: 0,
     foundHeader: headerSection !== null,
