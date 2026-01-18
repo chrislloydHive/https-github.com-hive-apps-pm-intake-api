@@ -120,6 +120,34 @@ function coerceToString(val: unknown): string | null {
   return null;
 }
 
+/**
+ * Normalizes payload keys from uppercase (Airtable) to lowercase (internal schema).
+ * CONTENT -> content, PROJECT -> project, etc.
+ * Preserves nested objects and arrays.
+ */
+function normalizeKeysToLowercase(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    // Convert key to lowercase
+    const lowerKey = key.toLowerCase();
+
+    // Handle nested objects (but not arrays)
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      result[lowerKey] = normalizeKeysToLowercase(value as Record<string, unknown>);
+    } else {
+      result[lowerKey] = value;
+    }
+
+    // Also keep original key if different (for backwards compat)
+    if (key !== lowerKey) {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
 function coerceRequestBody(body: Record<string, unknown>): Record<string, unknown> {
   const coerced: Record<string, unknown> = { ...body };
   const fieldsToCoerce = [
@@ -145,7 +173,6 @@ function coerceRequestBody(body: Record<string, unknown>): Record<string, unknow
     "header",
     "shortOverview",
     "content",
-    "Content",  // Capital C - Airtable field name
     "sourceText",
     "bodyContent",
     "body",
@@ -221,8 +248,7 @@ const InputSchema = z.object({
   header: optionalString,           // Maps to {{HEADER}}
   shortOverview: optionalString,    // Maps to {{SHORT_OVERVIEW}}
   content: optionalString,          // Maps to {{CONTENT}} (direct, no GPT)
-  Content: optionalString,          // Capital C - Airtable field name
-  // Content field aliases (different Airtable field names)
+  // Content field aliases (keys normalized to lowercase by normalizeKeysToLowercase)
   sourceText: optionalString,       // Alias for content
   bodyContent: optionalString,      // Alias for content
   body: optionalString,             // Alias for content
@@ -867,10 +893,13 @@ export async function POST(req: Request) {
     );
   }
 
-  // Pull canonical merge map BEFORE coercion/zod, so Airtable automation mergeFields works
-  const merge = extractMergeMap(rawBody as Record<string, any>);
+  // Normalize uppercase keys to lowercase (Airtable sends CONTENT, PROJECT, etc.)
+  const normalizedBody = normalizeKeysToLowercase(rawBody);
 
-  const body = coerceRequestBody(rawBody);
+  // Pull canonical merge map BEFORE coercion/zod, so Airtable automation mergeFields works
+  const merge = extractMergeMap(normalizedBody as Record<string, any>);
+
+  const body = coerceRequestBody(normalizedBody);
   const parseResult = InputSchema.safeParse(body);
 
   if (!parseResult.success) {
@@ -892,22 +921,22 @@ export async function POST(req: Request) {
   // MODE DETECTION: Direct placeholders vs GPT polish
   // Direct mode: when content field is provided (from Airtable Automation)
   // ---------------------------------------------------------------------------
+  // Keys are normalized to lowercase, so we only check lowercase variants
   const isDirectMode =
     hasMeaningfulText(input.content) ||
-    hasMeaningfulText(input.Content) ||  // Capital C - Airtable field name
     hasMeaningfulText(input.sourceText) ||
     hasMeaningfulText(input.body) ||
     hasMeaningfulText(input.text) ||
     hasMeaningfulText(input.notes) ||
-    hasMeaningfulText(merge.CONTENT) ||
+    hasMeaningfulText(merge.content) ||   // Normalized from CONTENT
     hasMeaningfulText(input.inlineTable) ||
-    hasMeaningfulText(merge.INLINE_TABLE) ||
+    hasMeaningfulText(merge.inlinetable) || // Normalized from INLINE_TABLE
     hasMeaningfulText(input.project) ||
-    hasMeaningfulText(merge.PROJECT);
+    hasMeaningfulText(merge.project);      // Normalized from PROJECT
 
   console.log(`[generate-doc][${requestId}] Mode: ${isDirectMode ? "DIRECT" : "GPT"}`);
   console.log(`[generate-doc][${requestId}] Input fields: content=${!!input.content}, sourceNotes=${!!input.sourceNotes}, project=${!!input.project}, inlineTable=${!!input.inlineTable}`);
-  console.log(`[generate-doc][${requestId}] Merge fields: CONTENT=${!!merge.CONTENT}, PROJECT=${!!merge.PROJECT}`);
+  console.log(`[generate-doc][${requestId}] Merge fields: content=${!!merge.content}, project=${!!merge.project}`);
 
   // ---------------------------------------------------------------------------
   // FOLDER RESOLUTION: input.destinationFolderId > PREPARED_DOCUMENTS_FOLDER_ID > projectFolderId
@@ -990,58 +1019,58 @@ export async function POST(req: Request) {
   if (isDirectMode) {
     // ---------------------------------------------------------------------------
     // DIRECT MODE: Use provided placeholders directly (skip GPT)
+    // Keys are normalized to lowercase by normalizeKeysToLowercase()
     // ---------------------------------------------------------------------------
-    // Prefer explicit direct fields, then mergeFields, then legacy fields
     finalProject =
       input.project ||
-      merge.PROJECT ||
+      merge.project ||        // Normalized from PROJECT
       input.projectName ||
       null;
 
     finalClient =
       input.client ||
-      merge.CLIENT ||
+      merge.client ||         // Normalized from CLIENT
       input.clientName ||
       null;
 
     finalHeader =
       input.header ||
-      merge.HEADER ||
+      merge.header ||         // Normalized from HEADER
       null;
 
     finalShortOverview =
       input.shortOverview ||
-      merge.SHORT_OVERVIEW ||
+      merge.short_overview || // Normalized from SHORT_OVERVIEW
       null;
 
     finalInlineTable =
       input.inlineTable ||
       input.inlineTableText ||
-      merge.INLINE_TABLE ||
+      merge.inline_table ||   // Normalized from INLINE_TABLE
+      merge.inlinetable ||    // Normalized from INLINETABLE
       null;
 
-    // Content: prefer direct content, then merge CONTENT, then sourceNotes, else single space
+    // Content: prefer direct content, then merge content, then sourceNotes, else single space
     finalContent =
       input.content ||
-      input.Content ||      // Capital C - Airtable field name
       input.sourceText ||
       input.body ||
       input.text ||
       input.notes ||
-      merge.CONTENT ||
+      merge.content ||        // Normalized from CONTENT
       input.sourceNotes ||
       " ";
 
-    // Title/subtitle: prefer merge PROJECT/SUBTITLE if present
+    // Title/subtitle
     finalTitle =
       finalProject ||
-      merge.TITLE || // optional legacy
+      merge.title ||          // Normalized from TITLE
       input.projectName ||
       "Untitled Document";
 
     finalSubtitle =
       input.subtitle ||
-      merge.SUBTITLE ||
+      merge.subtitle ||       // Normalized from SUBTITLE
       input.header ||
       "";
 
@@ -1149,9 +1178,9 @@ export async function POST(req: Request) {
       shortOverview: finalShortOverview,
       inlineTable: finalInlineTable,
       // Additional placeholders
-      projectNumber: input.projectNumber || merge.PROJECT_NUMBER || null,
-      startDate: input.startDate || merge.START_DATE || null,
-      dueDate: input.dueDate || merge.DUE_DATE || null,
+      projectNumber: input.projectNumber || merge.project_number || merge.projectnumber || null,
+      startDate: input.startDate || merge.start_date || merge.startdate || null,
+      dueDate: input.dueDate || merge.due_date || merge.duedate || null,
     },
     requestId
   );
