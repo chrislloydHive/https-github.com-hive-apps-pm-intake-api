@@ -3,7 +3,7 @@ import { z } from "zod";
 import Airtable from "airtable";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2026-01-17-direct-placeholders";
+const BUILD_TAG = "generate-doc-2026-01-17-inline-table";
 
 /**
  * POST /api/generate-doc
@@ -136,7 +136,10 @@ function coerceRequestBody(body: Record<string, unknown>): Record<string, unknow
     "header",
     "shortOverview",
     "content",
+    "inlineTable",
+    "inlineTableText",
     "templateId",
+    "templateDocId",
     "destinationFolderId",
     "generatedAt",
   ];
@@ -198,7 +201,10 @@ const InputSchema = z.object({
   header: optionalString,           // Maps to {{HEADER}}
   shortOverview: optionalString,    // Maps to {{SHORT_OVERVIEW}}
   content: optionalString,          // Maps to {{CONTENT}} (direct, no GPT)
+  inlineTable: optionalString,      // Maps to {{INLINE_TABLE}}
+  inlineTableText: optionalString,  // Fallback for {{INLINE_TABLE}}
   templateId: optionalString,       // Override template selection
+  templateDocId: optionalString,    // Alias for templateId
   destinationFolderId: optionalString, // Override destination folder
   generatedAt: optionalString,      // Override generated timestamp
 });
@@ -516,15 +522,16 @@ Return ONLY the JSON object with title, subtitle, and content. No code fences or
 /**
  * Calls Apps Script to:
  * 1. Copy the template doc to the destination folder
- * 2. Replace placeholders (supports both legacy and new):
- *    - Legacy: {{TITLE}}, {{SUBTITLE}}, {{GENERATED_AT}}, {{CONTENT}}
- *    - New: {{PROJECT}}, {{HEADER}}, {{SHORT_OVERVIEW}}, {{CONTENT}}
+ * 2. Replace placeholders:
+ *    {{PROJECT}}, {{CLIENT}}, {{HEADER}}, {{SHORT_OVERVIEW}}, {{CONTENT}}, {{INLINE_TABLE}}, {{GENERATED_AT}}
+ *    Legacy: {{TITLE}}, {{SUBTITLE}}
  * 3. Return docId, docUrl, pdfUrl
  */
 async function createDocFromTemplate(
   params: {
     templateDocId: string;
     destinationFolderId: string;
+    projectFolderId?: string; // For backward compat
     title: string;
     subtitle: string;
     generatedAt: string;
@@ -535,6 +542,7 @@ async function createDocFromTemplate(
     client?: string | null;
     header?: string | null;
     shortOverview?: string | null;
+    inlineTable?: string | null;
   },
   requestId: string
 ): Promise<{ ok: true; docId: string; docUrl: string; pdfUrl: string } | { ok: false; error: string }> {
@@ -544,26 +552,37 @@ async function createDocFromTemplate(
     return { ok: false, error: "APPS_SCRIPT_DOC_WEBAPP_URL not configured" };
   }
 
-  // Build placeholders object with both legacy and new placeholders
+  // Build placeholders with defensive defaults
   const contentValue = params.content || " "; // Single space if empty to avoid replacement issues
+  const inlineTableValue = params.inlineTable || ""; // Empty string if not provided
+
+  const placeholders: Record<string, string> = {
+    // Primary placeholders (from Airtable Automation)
+    "{{PROJECT}}": params.project || params.title || "",
+    "{{CLIENT}}": params.client || "",
+    "{{HEADER}}": params.header || "",
+    "{{SHORT_OVERVIEW}}": params.shortOverview || "",
+    "{{CONTENT}}": contentValue,
+    "{{INLINE_TABLE}}": inlineTableValue,
+    "{{GENERATED_AT}}": params.generatedAt || "",
+    // Legacy placeholders (backward compatibility)
+    "{{TITLE}}": params.title || "",
+    "{{SUBTITLE}}": params.subtitle || "",
+  };
+
+  // Debug log: show which placeholder keys have non-empty values
+  const populatedKeys = Object.entries(placeholders)
+    .filter(([_, v]) => v && v.trim() !== "")
+    .map(([k, _]) => k);
+  console.log(`[generate-doc][${requestId}] Placeholders present: ${populatedKeys.join(", ")}`);
 
   const payload = {
     action: "createFromTemplate",
     templateDocId: params.templateDocId,
     destinationFolderId: params.destinationFolderId,
+    projectFolderId: params.projectFolderId || params.destinationFolderId, // Backward compat
     docName: params.docName,
-    placeholders: {
-      // New placeholders (from Airtable Automation)
-      "{{PROJECT}}": params.project || params.title || "",
-      "{{CLIENT}}": params.client || "",
-      "{{HEADER}}": params.header || "",
-      "{{SHORT_OVERVIEW}}": params.shortOverview || "",
-      "{{CONTENT}}": contentValue,
-      // Legacy placeholders (backward compatibility)
-      "{{GENERATED_AT}}": params.generatedAt || "",
-      "{{TITLE}}": params.title || "",
-      "{{SUBTITLE}}": params.subtitle || "",
-    },
+    placeholders,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
   };
@@ -705,10 +724,11 @@ export async function POST(req: Request) {
   (body as Record<string, unknown>).projectFolderId = destinationFolderId;
 
   // ---------------------------------------------------------------------------
-  // TEMPLATE SELECTION: input.templateId > docType-based selection
+  // TEMPLATE SELECTION: input.templateId > input.templateDocId > docType-based selection
   // ---------------------------------------------------------------------------
-  const templateDocId = input.templateId?.trim() || selectTemplateId(input.docType || "");
-  console.log(`[generate-doc][${requestId}] Template: ${templateDocId} (source: ${input.templateId ? "payload" : "docType"})`);
+  const templateDocId = input.templateId?.trim() || input.templateDocId?.trim() || selectTemplateId(input.docType || "");
+  const templateSource = input.templateId ? "templateId" : input.templateDocId ? "templateDocId" : "docType";
+  console.log(`[generate-doc][${requestId}] Template: ${templateDocId} (source: ${templateSource})`);
 
   // ---------------------------------------------------------------------------
   // IDEMPOTENCY CHECK
@@ -738,24 +758,28 @@ export async function POST(req: Request) {
   let finalClient: string | null = null;
   let finalHeader: string | null = null;
   let finalShortOverview: string | null = null;
+  let finalInlineTable: string | null = null;
   let sourceType: string;
   let inputsUsed: string[] = [];
 
   // Use input.generatedAt if provided, otherwise use generated timestamp
   const finalGeneratedAt = input.generatedAt?.trim() || generatedAt;
 
+  // Resolve inlineTable from either field (used in both modes)
+  finalInlineTable = input.inlineTable || input.inlineTableText || null;
+
   if (isDirectMode) {
     // ---------------------------------------------------------------------------
     // DIRECT MODE: Use provided placeholders directly (skip GPT)
     // ---------------------------------------------------------------------------
-    finalProject = input.project || null;
-    finalClient = input.client || null;
+    finalProject = input.project || input.projectName || null;
+    finalClient = input.client || input.clientName || null;
     finalHeader = input.header || null;
     finalShortOverview = input.shortOverview || null;
-    finalContent = input.content || " ";
+    finalContent = input.content || input.sourceNotes || " ";
 
     // Title: use project as title fallback
-    finalTitle = input.project || "Untitled Document";
+    finalTitle = input.project || input.projectName || "Untitled Document";
     finalSubtitle = input.header || "";
     sourceType = "direct";
 
@@ -848,6 +872,7 @@ export async function POST(req: Request) {
     {
       templateDocId,
       destinationFolderId,
+      projectFolderId: input.projectFolderId || destinationFolderId,
       title: finalTitle,
       subtitle: finalSubtitle,
       generatedAt: finalGeneratedAt,
@@ -858,6 +883,7 @@ export async function POST(req: Request) {
       client: finalClient,
       header: finalHeader,
       shortOverview: finalShortOverview,
+      inlineTable: finalInlineTable,
     },
     requestId
   );
