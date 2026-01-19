@@ -24,7 +24,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { recordId, projectName } = body;
+    const { recordId, projectName, parentFolderId } = body;
 
     // Validate required fields
     if (!recordId || typeof recordId !== "string" || recordId.trim() === "") {
@@ -41,11 +41,24 @@ export async function POST(req: Request) {
       );
     }
 
+    // Build payload - include parentFolderId only if provided
+    const payload: { recordId: string; projectName: string; parentFolderId?: string } = {
+      recordId,
+      projectName,
+    };
+
+    // Optional: parentFolderId for client-specific folder routing
+    // When provided, the project folder will be created under this parent
+    // When missing, the Apps Script uses the default Work root folder
+    if (parentFolderId && typeof parentFolderId === "string" && parentFolderId.trim() !== "") {
+      payload.parentFolderId = parentFolderId.trim();
+    }
+
     // Forward request to Google Apps Script, following redirects
     const response = await fetch(APPS_SCRIPT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ recordId, projectName }),
+      body: JSON.stringify(payload),
       redirect: "follow",
     });
 
