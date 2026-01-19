@@ -34,18 +34,26 @@ export async function POST(req: Request) {
     const proxySecret = process.env.AIRTABLE_PROXY_SECRET;
     const providedSecret = req.headers.get("x-proxy-secret");
 
-    if (!proxySecret) {
-      console.error(`[gas-proxy][${requestId}] AIRTABLE_PROXY_SECRET env var not configured`);
+    if (!proxySecret || proxySecret.trim() === "") {
+      console.error(`[gas-proxy][${requestId}] AIRTABLE_PROXY_SECRET env var not configured (value: ${proxySecret === undefined ? "undefined" : proxySecret === "" ? "empty string" : "whitespace only"})`);
       return NextResponse.json(
-        { ok: false, error: "Proxy not configured" },
+        { ok: false, error: "Missing AIRTABLE_PROXY_SECRET env var" },
         { status: 500 }
       );
     }
 
-    if (!providedSecret || providedSecret !== proxySecret) {
-      console.warn(`[gas-proxy][${requestId}] Unauthorized: invalid or missing x-proxy-secret`);
+    if (!providedSecret) {
+      console.warn(`[gas-proxy][${requestId}] Unauthorized: missing x-proxy-secret header`);
       return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
+        { ok: false, error: "Unauthorized: missing x-proxy-secret header" },
+        { status: 401 }
+      );
+    }
+
+    if (providedSecret !== proxySecret) {
+      console.warn(`[gas-proxy][${requestId}] Unauthorized: x-proxy-secret mismatch`);
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized: invalid x-proxy-secret" },
         { status: 401 }
       );
     }
@@ -66,7 +74,7 @@ export async function POST(req: Request) {
 
     if (!gasUrl) {
       return NextResponse.json(
-        { ok: false, error: "Missing gasUrl in body and no GAS_WEB_APP_URL env var configured" },
+        { ok: false, error: "Missing gasUrl (and GAS_WEB_APP_URL not set)" },
         { status: 400 }
       );
     }
@@ -84,10 +92,7 @@ export async function POST(req: Request) {
 
     if (!ALLOWED_HOSTS.includes(parsedUrl.hostname)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: `Invalid gasUrl host: ${parsedUrl.hostname}. Allowed: ${ALLOWED_HOSTS.join(", ")}`,
-        },
+        { ok: false, error: "Invalid gasUrl host" },
         { status: 400 }
       );
     }
