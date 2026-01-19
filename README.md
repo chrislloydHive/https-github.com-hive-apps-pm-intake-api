@@ -74,6 +74,68 @@ curl -X POST http://localhost:3000/api/pm-intake \
 }
 ```
 
+### POST /api/gas-proxy
+
+Redirect-safe proxy for Google Apps Script Web Apps. Airtable Automations cannot follow HTTP 302 redirects that GAS returns, so this proxy handles that server-side.
+
+**Headers:**
+- `Content-Type: application/json`
+- `x-proxy-secret: <AIRTABLE_PROXY_SECRET>`
+
+**Request Body:**
+```json
+{
+  "gasUrl": "https://script.google.com/macros/s/.../exec",
+  "mode": "client",
+  "clientRecordId": "recABC123",
+  "clientName": "Acme Corp",
+  "clientType": "prospect",
+  "bucketRootFolderId": "1a2B3cDeFgHiJkLmNoPqRsTuVwXyZ"
+}
+```
+
+- `gasUrl` - Required (or set `GAS_WEB_APP_URL` env var as fallback). Must be a script.google.com /exec URL.
+- All other fields are passed through to the GAS endpoint.
+
+**Example Request:**
+```bash
+curl -X POST https://your-app.vercel.app/api/gas-proxy \
+  -H "Content-Type: application/json" \
+  -H "x-proxy-secret: your-secret" \
+  -d '{
+    "gasUrl": "https://script.google.com/macros/s/AKfycb.../exec",
+    "mode": "client",
+    "clientRecordId": "recABC123",
+    "clientName": "Test Client",
+    "clientType": "prospect",
+    "bucketRootFolderId": "1folder..."
+  }'
+```
+
+**Success Response:**
+Returns whatever the GAS endpoint returns:
+```json
+{
+  "ok": true,
+  "folderId": "1xYz789...",
+  "folderUrl": "https://drive.google.com/drive/folders/1xYz789..."
+}
+```
+
+**Error Responses:**
+- `401` - Missing or invalid `x-proxy-secret` header
+- `400` - Invalid gasUrl or missing required fields
+- `502` - GAS returned HTML or non-JSON (includes `bodySnippet` for debugging)
+
+### GET /api/gas-proxy
+
+Health check endpoint.
+
+**Response:**
+```json
+{ "ok": true, "service": "gas-proxy" }
+```
+
 ## Features
 
 - **Linked Records:** Automatically resolves or creates Client and Project records
@@ -116,4 +178,6 @@ Set environment variables in Vercel dashboard or via CLI:
 vercel env add PM_INTAKE_TOKEN
 vercel env add AIRTABLE_API_KEY
 vercel env add AIRTABLE_BASE_ID
+vercel env add AIRTABLE_PROXY_SECRET
+vercel env add GAS_WEB_APP_URL  # optional fallback
 ```
