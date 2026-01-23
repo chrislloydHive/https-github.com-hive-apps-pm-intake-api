@@ -36,7 +36,7 @@ const AIRTABLE_OS_BASE_ID = process.env.AIRTABLE_OS_BASE_ID;
 const AIRTABLE_OS_TABLE_COMPANIES = process.env.AIRTABLE_OS_TABLE_COMPANIES;
 const AIRTABLE_OS_TABLE_OPPORTUNITIES = process.env.AIRTABLE_OS_TABLE_OPPORTUNITIES;
 const AIRTABLE_OS_TABLE_INBOX_ITEMS = process.env.AIRTABLE_OS_TABLE_INBOX_ITEMS;
-const INBOX_SHARED_SECRET = process.env.INBOX_SHARED_SECRET;
+const HIVE_INBOUND_EMAIL_SECRET = process.env.HIVE_INBOUND_EMAIL_SECRET;
 
 // Validate required env vars at startup
 const missingEnvVars: string[] = [];
@@ -45,7 +45,7 @@ if (!AIRTABLE_OS_BASE_ID) missingEnvVars.push("AIRTABLE_OS_BASE_ID");
 if (!AIRTABLE_OS_TABLE_COMPANIES) missingEnvVars.push("AIRTABLE_OS_TABLE_COMPANIES");
 if (!AIRTABLE_OS_TABLE_OPPORTUNITIES) missingEnvVars.push("AIRTABLE_OS_TABLE_OPPORTUNITIES");
 if (!AIRTABLE_OS_TABLE_INBOX_ITEMS) missingEnvVars.push("AIRTABLE_OS_TABLE_INBOX_ITEMS");
-if (!INBOX_SHARED_SECRET) missingEnvVars.push("INBOX_SHARED_SECRET");
+if (!HIVE_INBOUND_EMAIL_SECRET) missingEnvVars.push("HIVE_INBOUND_EMAIL_SECRET");
 
 if (missingEnvVars.length > 0) {
   console.error("INBOX_EMAIL_CONFIG_ERROR", { missing: missingEnvVars });
@@ -375,7 +375,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     // Auth check
     const providedSecret = req.headers.get("x-inbox-secret");
-    if (!providedSecret || providedSecret !== INBOX_SHARED_SECRET) {
+    if (!providedSecret || providedSecret !== HIVE_INBOUND_EMAIL_SECRET) {
       console.warn("INBOX_EMAIL_UNAUTHORIZED", { traceId });
       return errorResponse(traceId, "Unauthorized", 401);
     }
