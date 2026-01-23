@@ -4,10 +4,16 @@ import { NextResponse } from "next/server";
  * Gmail Inbound API - Company Only
  * Creates or finds Companies in Client PM OS Airtable
  *
- * Uses inbound-specific env vars with fallback to default DB vars:
- * - AIRTABLE_INBOUND_BASE_ID → AIRTABLE_BASE_ID
- * - AIRTABLE_INBOUND_TABLE_COMPANIES → AIRTABLE_TABLE_COMPANIES
+ * IMPORTANT: This route writes ONLY to Client PM OS, never to the Hive Database.
+ * Requires AIRTABLE_INBOUND_* env vars - no fallback to DB vars.
  */
+
+const INBOUND_BASE_ID = process.env.AIRTABLE_INBOUND_BASE_ID;
+const INBOUND_COMPANY_TABLE = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES;
+
+if (!INBOUND_BASE_ID || !INBOUND_COMPANY_TABLE) {
+  throw new Error("Gmail inbound misconfigured: AIRTABLE_INBOUND_* env vars missing");
+}
 
 const AIRTABLE_API = "https://api.airtable.com/v0";
 
@@ -35,22 +41,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Missing companyName" }, { status: 400 });
     }
 
-    // Inbound-specific env vars with fallbacks
-    const baseId =
-      process.env.AIRTABLE_INBOUND_BASE_ID ??
-      process.env.AIRTABLE_BASE_ID;
-
-    const companiesTableId =
-      process.env.AIRTABLE_INBOUND_TABLE_COMPANIES ??
-      process.env.AIRTABLE_TABLE_COMPANIES;
-
     const apiKey = process.env.AIRTABLE_API_KEY;
-
-    if (!baseId || !apiKey || !companiesTableId) {
-      return NextResponse.json(
-        { ok: false, error: "Missing Airtable configuration" },
-        { status: 500 }
-      );
+    if (!apiKey) {
+      return NextResponse.json({ ok: false, error: "Missing AIRTABLE_API_KEY" }, { status: 500 });
     }
 
     const headers = {
@@ -58,8 +51,8 @@ export async function POST(req: Request) {
       "Content-Type": "application/json",
     };
 
-    // Search for existing company
-    const searchUrl = `${AIRTABLE_API}/${baseId}/${companiesTableId}?filterByFormula=${encodeURIComponent(
+    // Search for existing company in Client PM OS
+    const searchUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
       `{Name}="${companyName.replace(/"/g, '\\"')}"`
     )}&maxRecords=1`;
 
@@ -72,13 +65,13 @@ export async function POST(req: Request) {
     if (searchData.records?.length > 0) {
       companyRecordId = searchData.records[0].id;
     } else {
-      // Create new company
+      // Create new company in Client PM OS
       const fields: Record<string, any> = { Name: companyName };
       if (website) fields["Website"] = website;
       if (industry) fields["Industry"] = industry;
       if (notes) fields["Notes"] = notes;
 
-      const createRes = await fetch(`${AIRTABLE_API}/${baseId}/${companiesTableId}`, {
+      const createRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields }),
