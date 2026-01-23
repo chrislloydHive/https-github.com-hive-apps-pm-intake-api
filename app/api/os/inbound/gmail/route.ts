@@ -297,8 +297,15 @@ export async function POST(req: Request) {
       if (opportunityStage) opportunityFields["Stage"] = opportunityStage;
 
       // Link Company using record ID array (NOT name string)
+      // Note: Company field must be linked to the same table as INBOUND_COMPANY_TABLE
       if (companyRecordId) {
         opportunityFields["Company"] = [companyRecordId];
+        console.log("OPPORTUNITY_COMPANY_LINK", {
+          marker,
+          companyRecordId,
+          companyTable: INBOUND_COMPANY_TABLE,
+          linkValue: [companyRecordId],
+        });
       }
 
       if (contactEmail) opportunityFields["Contact Email"] = contactEmail;
@@ -310,12 +317,34 @@ export async function POST(req: Request) {
       opportunityFields[INBOUND_MARKER_FIELD] = marker;
 
       const createOppUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_OPP_TABLE}`;
-      const createOppRes = await tracedFetch(marker, createOppUrl, {
+
+      console.log("OPPORTUNITY_CREATE_PAYLOAD", { marker, fields: opportunityFields });
+
+      let createOppRes = await tracedFetch(marker, createOppUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields: opportunityFields }),
       });
-      const createOppData = await createOppRes.json();
+      let createOppData = await createOppRes.json();
+
+      // If Company link failed, retry without it
+      if (createOppData.error && createOppData.error.message?.includes("Company")) {
+        console.warn("OPPORTUNITY_COMPANY_LINK_FAILED", {
+          marker,
+          error: createOppData.error,
+          companyRecordId,
+          hint: "Check that Opportunities.Company is linked to the correct Companies table",
+        });
+
+        // Remove Company and retry
+        delete opportunityFields["Company"];
+        createOppRes = await tracedFetch(marker, createOppUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ fields: opportunityFields }),
+        });
+        createOppData = await createOppRes.json();
+      }
 
       if (createOppData.error) {
         console.error("OPPORTUNITY_CREATE_ERROR", { marker, error: createOppData.error });
