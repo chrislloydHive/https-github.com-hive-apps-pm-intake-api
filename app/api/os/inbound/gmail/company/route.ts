@@ -18,6 +18,12 @@ if (!INBOUND_BASE_ID || !INBOUND_COMPANY_TABLE) {
 const AIRTABLE_API = "https://api.airtable.com/v0";
 
 export async function POST(req: Request) {
+  // Log to prove we're writing to OS, not DB
+  console.log("GMAIL INBOUND COMPANY → OS", {
+    base: INBOUND_BASE_ID,
+    companyTable: INBOUND_COMPANY_TABLE,
+  });
+
   try {
     // Auth
     const authHeader = req.headers.get("authorization");
