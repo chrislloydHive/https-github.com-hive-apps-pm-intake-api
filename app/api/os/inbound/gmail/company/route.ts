@@ -6,6 +6,8 @@ import { NextResponse } from "next/server";
  *
  * IMPORTANT: This route writes ONLY to Client PM OS, never to the Hive Database.
  * Requires AIRTABLE_INBOUND_* env vars - no fallback to DB vars.
+ *
+ * Company lookup uses domain-based matching - does NOT rely on linked-field auto-create.
  */
 
 // Client PM OS env vars - NO DB FALLBACKS
@@ -62,6 +64,140 @@ async function tracedFetch(
   return response;
 }
 
+/**
+ * Normalize domain: lowercase, trim, remove protocol/paths, keep only hostname
+ * Examples:
+ *   "https://Example.COM/path" -> "example.com"
+ *   "WWW.Example.com" -> "example.com"
+ *   "example.com" -> "example.com"
+ */
+function normalizeDomain(input: string): string {
+  if (!input) return "";
+
+  let domain = input.trim().toLowerCase();
+
+  // Remove protocol if present
+  domain = domain.replace(/^https?:\/\//, "");
+
+  // Remove path and query string
+  domain = domain.split("/")[0].split("?")[0];
+
+  // Remove www. prefix
+  domain = domain.replace(/^www\./, "");
+
+  return domain;
+}
+
+/**
+ * Extract domain from email address
+ * Examples:
+ *   "user@example.com" -> "example.com"
+ *   "User Name <user@example.com>" -> "example.com"
+ */
+function extractDomainFromEmail(email: string): string | null {
+  if (!email) return null;
+
+  // Handle "Name <email>" format
+  const angleMatch = email.match(/<([^>]+)>/);
+  const emailAddr = angleMatch ? angleMatch[1] : email;
+
+  // Extract domain from email
+  const atIndex = emailAddr.lastIndexOf("@");
+  if (atIndex === -1) return null;
+
+  const domain = emailAddr.slice(atIndex + 1).trim();
+  return normalizeDomain(domain);
+}
+
+/**
+ * Get or create a Company by domain.
+ * Search priority:
+ *   1. normalizedDomain_text == normalized domain
+ *   2. domain field == domain
+ * If not found, creates a new Company with Name, domain, and normalizedDomain_text.
+ * Returns the Company record ID.
+ */
+async function getOrCreateCompany(
+  marker: string,
+  headers: Record<string, string>,
+  opts: {
+    domain: string;
+    companyName?: string;
+    website?: string;
+    industry?: string;
+    notes?: string;
+  }
+): Promise<{ recordId: string; created: boolean; matchedBy?: string }> {
+  const normalizedDomain = normalizeDomain(opts.domain);
+
+  if (!normalizedDomain) {
+    throw new Error("Cannot create company: no valid domain provided");
+  }
+
+  console.log("COMPANY_LOOKUP", { marker, domain: opts.domain, normalizedDomain });
+
+  // Search by normalizedDomain_text first
+  const searchByNormalizedUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
+    `{normalizedDomain_text}="${normalizedDomain.replace(/"/g, '\\"')}"`
+  )}&maxRecords=1`;
+
+  const searchRes1 = await tracedFetch(marker, searchByNormalizedUrl, { headers });
+  const searchData1 = await searchRes1.json();
+
+  if (searchData1.records?.length > 0) {
+    const recordId = searchData1.records[0].id;
+    console.log("COMPANY_FOUND_BY_NORMALIZED_DOMAIN", { marker, recordId, normalizedDomain });
+    return { recordId, created: false, matchedBy: "normalizedDomain_text" };
+  }
+
+  // Search by domain field
+  const searchByDomainUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
+    `{domain}="${normalizedDomain.replace(/"/g, '\\"')}"`
+  )}&maxRecords=1`;
+
+  const searchRes2 = await tracedFetch(marker, searchByDomainUrl, { headers });
+  const searchData2 = await searchRes2.json();
+
+  if (searchData2.records?.length > 0) {
+    const recordId = searchData2.records[0].id;
+    console.log("COMPANY_FOUND_BY_DOMAIN", { marker, recordId, normalizedDomain });
+    return { recordId, created: false, matchedBy: "domain" };
+  }
+
+  // Not found - create new Company
+  const companyFields: Record<string, any> = {
+    Name: opts.companyName || normalizedDomain,
+    domain: normalizedDomain,
+    normalizedDomain_text: normalizedDomain,
+  };
+
+  // Add optional fields
+  if (opts.website) companyFields["Website"] = opts.website;
+  if (opts.industry) companyFields["Industry"] = opts.industry;
+  if (opts.notes) companyFields["Notes"] = opts.notes;
+
+  console.log("COMPANY_CREATING", { marker, fields: companyFields });
+
+  const createUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`;
+  const createRes = await tracedFetch(marker, createUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fields: companyFields }),
+  });
+
+  const createData = await createRes.json();
+
+  if (createData.error) {
+    console.error("COMPANY_CREATE_ERROR", { marker, error: createData.error });
+    throw new Error(`Failed to create company: ${createData.error.message || JSON.stringify(createData.error)}`);
+  }
+
+  const recordId = createData.id;
+  console.log("COMPANY_CREATED", { marker, recordId, normalizedDomain });
+
+  return { recordId, created: true };
+}
+
 export async function POST(req: Request) {
   // Unique marker for this request (for tracing through logs)
   const marker = `gmail_co_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -96,14 +232,36 @@ export async function POST(req: Request) {
       );
     }
 
-    const { companyName, website, industry, notes } = body;
+    const {
+      companyName,
+      email,        // Sender email to extract domain from
+      domain,       // Explicit domain override
+      website,
+      industry,
+      notes,
+    } = body;
 
-    if (!companyName) {
+    // Extract domain from email or use provided domain
+    const extractedDomain = domain || extractDomainFromEmail(email);
+
+    if (!extractedDomain) {
       return NextResponse.json(
-        { ok: false, error: "Missing companyName", _debug: getDebugPayload() },
+        {
+          ok: false,
+          error: "Missing or invalid email/domain. Cannot determine company domain.",
+          hint: "Provide email (sender email) or domain field",
+          _debug: getDebugPayload(),
+        },
         { status: 400 }
       );
     }
+
+    console.log("GMAIL_INBOUND_COMPANY_PARSED", {
+      marker,
+      companyName,
+      email,
+      extractedDomain,
+    });
 
     const apiKey = process.env.AIRTABLE_API_KEY;
     if (!apiKey) {
@@ -118,48 +276,31 @@ export async function POST(req: Request) {
       "Content-Type": "application/json",
     };
 
-    // Search for existing company in Client PM OS
-    const searchUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
-      `{Name}="${companyName.replace(/"/g, '\\"')}"`
-    )}&maxRecords=1`;
+    // Get or create Company by domain
+    const companyResult = await getOrCreateCompany(marker, headers, {
+      domain: extractedDomain,
+      companyName: companyName || undefined,
+      website: website || undefined,
+      industry: industry || undefined,
+      notes: notes || undefined,
+    });
 
-    const searchRes = await tracedFetch(marker, searchUrl, { headers });
-    const searchData = await searchRes.json();
-
-    let companyRecordId: string;
-    let created = false;
-
-    if (searchData.records?.length > 0) {
-      companyRecordId = searchData.records[0].id;
-      console.log("COMPANY_FOUND", { marker, companyRecordId });
-    } else {
-      // Create new company in Client PM OS
-      const fields: Record<string, any> = { Name: companyName };
-      if (website) fields["Website"] = website;
-      if (industry) fields["Industry"] = industry;
-      if (notes) fields["Notes"] = notes;
-
-      const createUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`;
-      const createRes = await tracedFetch(marker, createUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ fields }),
-      });
-      const createData = await createRes.json();
-      companyRecordId = createData.id;
-      created = true;
-      console.log("COMPANY_CREATED", { marker, companyRecordId });
-    }
-
-    console.log("GMAIL_INBOUND_COMPANY_COMPLETE", { marker, companyRecordId, created });
+    console.log("GMAIL_INBOUND_COMPANY_COMPLETE", {
+      marker,
+      companyRecordId: companyResult.recordId,
+      created: companyResult.created,
+      matchedBy: companyResult.matchedBy,
+    });
 
     return NextResponse.json({
       status: "success",
       marker,
       company: {
-        id: companyRecordId,
-        name: companyName,
-        created,
+        id: companyResult.recordId,
+        name: companyName || extractedDomain,
+        domain: extractedDomain,
+        created: companyResult.created,
+        matchedBy: companyResult.matchedBy,
       },
       _debug: getDebugPayload(),
     });
