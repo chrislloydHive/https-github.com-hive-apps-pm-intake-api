@@ -25,8 +25,50 @@ function getDebugPayload() {
   };
 }
 
+// Extract baseId from Airtable URL for logging
+function extractBaseId(url: string): string {
+  const match = url.match(/airtable\.com\/v0\/([^/]+)/);
+  return match ? match[1] : "unknown";
+}
+
+// Traced fetch wrapper - logs all Airtable requests
+async function tracedFetch(
+  marker: string,
+  url: string,
+  options: RequestInit = {}
+): Promise<Response> {
+  const method = options.method || "GET";
+  const baseId = extractBaseId(url);
+
+  console.log("AIRTABLE_REQUEST", {
+    marker,
+    method,
+    url,
+    baseId,
+    expectedBaseId: INBOUND_BASE_ID,
+    match: baseId === INBOUND_BASE_ID,
+  });
+
+  const response = await fetch(url, options);
+
+  console.log("AIRTABLE_RESPONSE", {
+    marker,
+    method,
+    baseId,
+    status: response.status,
+    ok: response.ok,
+  });
+
+  return response;
+}
+
 export async function POST(req: Request) {
+  // Unique marker for this request (for tracing through logs)
+  const marker = `gmail_co_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  console.log("GMAIL_INBOUND_MARKER", marker);
   console.log("GMAIL INBOUND COMPANY → OS (APP ROUTER)", {
+    marker,
     base: INBOUND_BASE_ID,
     companyTable: INBOUND_COMPANY_TABLE,
   });
@@ -81,7 +123,7 @@ export async function POST(req: Request) {
       `{Name}="${companyName.replace(/"/g, '\\"')}"`
     )}&maxRecords=1`;
 
-    const searchRes = await fetch(searchUrl, { headers });
+    const searchRes = await tracedFetch(marker, searchUrl, { headers });
     const searchData = await searchRes.json();
 
     let companyRecordId: string;
@@ -89,6 +131,7 @@ export async function POST(req: Request) {
 
     if (searchData.records?.length > 0) {
       companyRecordId = searchData.records[0].id;
+      console.log("COMPANY_FOUND", { marker, companyRecordId });
     } else {
       // Create new company in Client PM OS
       const fields: Record<string, any> = { Name: companyName };
@@ -96,7 +139,8 @@ export async function POST(req: Request) {
       if (industry) fields["Industry"] = industry;
       if (notes) fields["Notes"] = notes;
 
-      const createRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`, {
+      const createUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`;
+      const createRes = await tracedFetch(marker, createUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields }),
@@ -104,10 +148,14 @@ export async function POST(req: Request) {
       const createData = await createRes.json();
       companyRecordId = createData.id;
       created = true;
+      console.log("COMPANY_CREATED", { marker, companyRecordId });
     }
+
+    console.log("GMAIL_INBOUND_COMPANY_COMPLETE", { marker, companyRecordId, created });
 
     return NextResponse.json({
       status: "success",
+      marker,
       company: {
         id: companyRecordId,
         name: companyName,

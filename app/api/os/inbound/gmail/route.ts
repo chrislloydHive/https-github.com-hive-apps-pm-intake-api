@@ -18,6 +18,9 @@ if (!INBOUND_BASE_ID || !INBOUND_OPP_TABLE || !INBOUND_COMPANY_TABLE) {
 
 const AIRTABLE_API = "https://api.airtable.com/v0";
 
+// Field name for inbound marker (for tracing)
+const INBOUND_MARKER_FIELD = "Inbound Marker";
+
 function getDebugPayload() {
   return {
     base: INBOUND_BASE_ID,
@@ -27,8 +30,50 @@ function getDebugPayload() {
   };
 }
 
+// Extract baseId from Airtable URL for logging
+function extractBaseId(url: string): string {
+  const match = url.match(/airtable\.com\/v0\/([^/]+)/);
+  return match ? match[1] : "unknown";
+}
+
+// Traced fetch wrapper - logs all Airtable requests
+async function tracedFetch(
+  marker: string,
+  url: string,
+  options: RequestInit = {}
+): Promise<Response> {
+  const method = options.method || "GET";
+  const baseId = extractBaseId(url);
+
+  console.log("AIRTABLE_REQUEST", {
+    marker,
+    method,
+    url,
+    baseId,
+    expectedBaseId: INBOUND_BASE_ID,
+    match: baseId === INBOUND_BASE_ID,
+  });
+
+  const response = await fetch(url, options);
+
+  console.log("AIRTABLE_RESPONSE", {
+    marker,
+    method,
+    baseId,
+    status: response.status,
+    ok: response.ok,
+  });
+
+  return response;
+}
+
 export async function POST(req: Request) {
+  // Unique marker for this request (for tracing through logs)
+  const marker = `gmail_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  console.log("GMAIL_INBOUND_MARKER", marker);
   console.log("GMAIL INBOUND → OS (APP ROUTER)", {
+    marker,
     base: INBOUND_BASE_ID,
     oppTable: INBOUND_OPP_TABLE,
     companyTable: INBOUND_COMPANY_TABLE,
@@ -94,13 +139,15 @@ export async function POST(req: Request) {
       `{Name}="${companyName.replace(/"/g, '\\"')}"`
     )}&maxRecords=1`;
 
-    const companySearchRes = await fetch(companySearchUrl, { headers });
+    const companySearchRes = await tracedFetch(marker, companySearchUrl, { headers });
     const companySearchData = await companySearchRes.json();
 
     if (companySearchData.records?.length > 0) {
       companyRecordId = companySearchData.records[0].id;
+      console.log("COMPANY_FOUND", { marker, companyRecordId });
     } else {
-      const createCompanyRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`, {
+      const createCompanyUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`;
+      const createCompanyRes = await tracedFetch(marker, createCompanyUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -109,6 +156,7 @@ export async function POST(req: Request) {
       });
       const createCompanyData = await createCompanyRes.json();
       companyRecordId = createCompanyData.id;
+      console.log("COMPANY_CREATED", { marker, companyRecordId });
     }
 
     // 2. Create Opportunity in Client PM OS
@@ -127,13 +175,18 @@ export async function POST(req: Request) {
       if (source) opportunityFields["Source"] = source;
       if (notes) opportunityFields["Notes"] = notes;
 
-      const createOppRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_OPP_TABLE}`, {
+      // Add inbound marker for tracing
+      opportunityFields[INBOUND_MARKER_FIELD] = marker;
+
+      const createOppUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_OPP_TABLE}`;
+      const createOppRes = await tracedFetch(marker, createOppUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields: opportunityFields }),
       });
       const createOppData = await createOppRes.json();
       opportunityRecordId = createOppData.id;
+      console.log("OPPORTUNITY_CREATED", { marker, opportunityRecordId });
 
       const viewUrl = process.env.AIRTABLE_INBOUND_OPP_VIEW_URL;
       if (viewUrl && opportunityRecordId) {
@@ -141,8 +194,11 @@ export async function POST(req: Request) {
       }
     }
 
+    console.log("GMAIL_INBOUND_COMPLETE", { marker, opportunityRecordId, companyRecordId });
+
     return NextResponse.json({
       status: "success",
+      marker,
       opportunity: opportunityRecordId
         ? {
             id: opportunityRecordId,
