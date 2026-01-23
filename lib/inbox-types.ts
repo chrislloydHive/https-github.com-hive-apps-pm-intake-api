@@ -73,6 +73,7 @@ export interface InboxEmailResponse {
 // ============================================================================
 
 export interface CompanyFields {
+  [key: string]: unknown;
   "Company Name": string;
   Domain?: string;
   "Normalized Domain"?: string;
@@ -80,6 +81,7 @@ export interface CompanyFields {
 }
 
 export interface OpportunityFields {
+  [key: string]: unknown;
   "Opportunity Name": string;
   Company?: string[]; // Linked record IDs
   Stage?: string;
@@ -89,6 +91,7 @@ export interface OpportunityFields {
 }
 
 export interface InboxItemFields {
+  [key: string]: unknown;
   "Trace ID": string;
   "Gmail Message ID": string;
   "Gmail Thread ID": string;

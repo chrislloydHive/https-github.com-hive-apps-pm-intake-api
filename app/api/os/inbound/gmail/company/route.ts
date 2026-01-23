@@ -14,8 +14,12 @@ import { NextResponse } from "next/server";
 const INBOUND_BASE_ID = process.env.AIRTABLE_INBOUND_BASE_ID;
 const INBOUND_COMPANY_TABLE = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES;
 
-if (!INBOUND_BASE_ID || !INBOUND_COMPANY_TABLE) {
-  throw new Error("Gmail inbound misconfigured: AIRTABLE_INBOUND_* env vars missing");
+// Check at runtime, not module load
+function checkEnvVars(): string | null {
+  if (!INBOUND_BASE_ID || !INBOUND_COMPANY_TABLE) {
+    return "Gmail inbound misconfigured: AIRTABLE_INBOUND_* env vars missing";
+  }
+  return null;
 }
 
 const AIRTABLE_API = "https://api.airtable.com/v0";
@@ -201,6 +205,15 @@ async function getOrCreateCompany(
 export async function POST(req: Request) {
   // Unique marker for this request (for tracing through logs)
   const marker = `gmail_co_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  // Check env vars at runtime
+  const envError = checkEnvVars();
+  if (envError) {
+    return NextResponse.json(
+      { ok: false, error: envError, _debug: getDebugPayload() },
+      { status: 500 }
+    );
+  }
 
   console.log("GMAIL_INBOUND_MARKER", marker);
   console.log("GMAIL INBOUND COMPANY → OS (APP ROUTER)", {
