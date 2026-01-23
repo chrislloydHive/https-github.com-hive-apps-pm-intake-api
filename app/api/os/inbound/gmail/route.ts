@@ -7,22 +7,52 @@ import { NextResponse } from "next/server";
  * Requires AIRTABLE_INBOUND_* env vars - no fallback to DB vars.
  */
 
-const INBOUND_BASE_ID = process.env.AIRTABLE_INBOUND_BASE_ID;
-const INBOUND_OPP_TABLE = process.env.AIRTABLE_INBOUND_TABLE_OPPORTUNITIES;
-const INBOUND_COMPANY_TABLE = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES;
+const ROUTE_VERSION = "gmail-inbound-os-debug-001";
 
-if (!INBOUND_BASE_ID || !INBOUND_OPP_TABLE || !INBOUND_COMPANY_TABLE) {
+// Inbound-specific env vars (MUST be set)
+const inboundBaseId = process.env.AIRTABLE_INBOUND_BASE_ID || "";
+const inboundOppTable = process.env.AIRTABLE_INBOUND_TABLE_OPPORTUNITIES || "";
+const inboundCompanyTable = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES || "";
+
+// Fallback env vars (should NOT be used, but captured for debug)
+const fallbackBaseId = process.env.AIRTABLE_BASE_ID || "";
+const fallbackOppTable = process.env.AIRTABLE_TABLE_OPPORTUNITIES || "";
+const fallbackCompanyTable = process.env.AIRTABLE_TABLE_COMPANIES || "";
+
+// ACTUAL IDs used for writes - NO FALLBACK, inbound only
+const usedBaseId = inboundBaseId;
+const usedOppTable = inboundOppTable;
+const usedCompanyTable = inboundCompanyTable;
+
+if (!usedBaseId || !usedOppTable || !usedCompanyTable) {
   throw new Error("Gmail inbound misconfigured: AIRTABLE_INBOUND_* env vars missing");
 }
 
 const AIRTABLE_API = "https://api.airtable.com/v0";
 
+function getDebugPayload() {
+  return {
+    routeVersion: ROUTE_VERSION,
+    inboundBaseId,
+    inboundOppTable,
+    inboundCompanyTable,
+    fallbackBaseId,
+    fallbackOppTable,
+    fallbackCompanyTable,
+    usedBaseId,
+    usedOppTable,
+    usedCompanyTable,
+    inboundViewUrl: process.env.AIRTABLE_INBOUND_OPP_VIEW_URL || "",
+  };
+}
+
 export async function POST(req: Request) {
   // Log to prove we're writing to OS, not DB
-  console.log("GMAIL INBOUND → OS", {
-    base: INBOUND_BASE_ID,
-    oppTable: INBOUND_OPP_TABLE,
-    companyTable: INBOUND_COMPANY_TABLE,
+  console.log("GMAIL INBOUND DEBUG", {
+    ROUTE_VERSION,
+    usedBaseId,
+    usedOppTable,
+    usedCompanyTable,
   });
 
   try {
@@ -31,7 +61,10 @@ export async function POST(req: Request) {
     const expectedToken = process.env.PM_INTAKE_TOKEN || process.env.PM_INTAKE_BEARER_TOKEN;
 
     if (!expectedToken || !authHeader || authHeader !== `Bearer ${expectedToken}`) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized", _debug: getDebugPayload() },
+        { status: 401 }
+      );
     }
 
     // Parse body
@@ -39,7 +72,10 @@ export async function POST(req: Request) {
     try {
       body = await req.json();
     } catch {
-      return NextResponse.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Invalid JSON", _debug: getDebugPayload() },
+        { status: 400 }
+      );
     }
 
     const {
@@ -53,12 +89,18 @@ export async function POST(req: Request) {
     } = body;
 
     if (!companyName) {
-      return NextResponse.json({ ok: false, error: "Missing companyName" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Missing companyName", _debug: getDebugPayload() },
+        { status: 400 }
+      );
     }
 
     const apiKey = process.env.AIRTABLE_API_KEY;
     if (!apiKey) {
-      return NextResponse.json({ ok: false, error: "Missing AIRTABLE_API_KEY" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "Missing AIRTABLE_API_KEY", _debug: getDebugPayload() },
+        { status: 500 }
+      );
     }
 
     const headers = {
@@ -69,7 +111,7 @@ export async function POST(req: Request) {
     // 1. Find or create Company in Client PM OS
     let companyRecordId: string | null = null;
 
-    const companySearchUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
+    const companySearchUrl = `${AIRTABLE_API}/${usedBaseId}/${usedCompanyTable}?filterByFormula=${encodeURIComponent(
       `{Name}="${companyName.replace(/"/g, '\\"')}"`
     )}&maxRecords=1`;
 
@@ -79,7 +121,7 @@ export async function POST(req: Request) {
     if (companySearchData.records?.length > 0) {
       companyRecordId = companySearchData.records[0].id;
     } else {
-      const createCompanyRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`, {
+      const createCompanyRes = await fetch(`${AIRTABLE_API}/${usedBaseId}/${usedCompanyTable}`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -106,7 +148,7 @@ export async function POST(req: Request) {
       if (source) opportunityFields["Source"] = source;
       if (notes) opportunityFields["Notes"] = notes;
 
-      const createOppRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_OPP_TABLE}`, {
+      const createOppRes = await fetch(`${AIRTABLE_API}/${usedBaseId}/${usedOppTable}`, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields: opportunityFields }),
@@ -114,9 +156,9 @@ export async function POST(req: Request) {
       const createOppData = await createOppRes.json();
       opportunityRecordId = createOppData.id;
 
-      const inboundViewUrl = process.env.AIRTABLE_INBOUND_OPP_VIEW_URL;
-      if (inboundViewUrl && opportunityRecordId) {
-        opportunityUrl = `${inboundViewUrl}/${opportunityRecordId}`;
+      const viewUrl = process.env.AIRTABLE_INBOUND_OPP_VIEW_URL;
+      if (viewUrl && opportunityRecordId) {
+        opportunityUrl = `${viewUrl}/${opportunityRecordId}`;
       }
     }
 
@@ -134,16 +176,21 @@ export async function POST(req: Request) {
         id: companyRecordId,
         name: companyName,
       },
+      _debug: getDebugPayload(),
     });
   } catch (e: any) {
     console.error("[os/inbound/gmail] Error:", e);
     return NextResponse.json(
-      { ok: false, error: e?.message || "Internal error" },
+      { ok: false, error: e?.message || "Internal error", _debug: getDebugPayload() },
       { status: 500 }
     );
   }
 }
 
 export async function GET() {
-  return NextResponse.json({ ok: true, route: "os/inbound/gmail" });
+  return NextResponse.json({
+    ok: true,
+    route: "os/inbound/gmail",
+    _debug: getDebugPayload(),
+  });
 }
