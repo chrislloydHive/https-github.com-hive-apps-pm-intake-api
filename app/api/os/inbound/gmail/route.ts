@@ -7,24 +7,12 @@ import { NextResponse } from "next/server";
  * Requires AIRTABLE_INBOUND_* env vars - no fallback to DB vars.
  */
 
-const ROUTE_VERSION = "gmail-inbound-os-debug-001";
+// Client PM OS env vars - NO DB FALLBACKS
+const INBOUND_BASE_ID = process.env.AIRTABLE_INBOUND_BASE_ID;
+const INBOUND_OPP_TABLE = process.env.AIRTABLE_INBOUND_TABLE_OPPORTUNITIES;
+const INBOUND_COMPANY_TABLE = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES;
 
-// Inbound-specific env vars (MUST be set)
-const inboundBaseId = process.env.AIRTABLE_INBOUND_BASE_ID || "";
-const inboundOppTable = process.env.AIRTABLE_INBOUND_TABLE_OPPORTUNITIES || "";
-const inboundCompanyTable = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES || "";
-
-// Fallback env vars (should NOT be used, but captured for debug)
-const fallbackBaseId = process.env.AIRTABLE_BASE_ID || "";
-const fallbackOppTable = process.env.AIRTABLE_TABLE_OPPORTUNITIES || "";
-const fallbackCompanyTable = process.env.AIRTABLE_TABLE_COMPANIES || "";
-
-// ACTUAL IDs used for writes - NO FALLBACK, inbound only
-const usedBaseId = inboundBaseId;
-const usedOppTable = inboundOppTable;
-const usedCompanyTable = inboundCompanyTable;
-
-if (!usedBaseId || !usedOppTable || !usedCompanyTable) {
+if (!INBOUND_BASE_ID || !INBOUND_OPP_TABLE || !INBOUND_COMPANY_TABLE) {
   throw new Error("Gmail inbound misconfigured: AIRTABLE_INBOUND_* env vars missing");
 }
 
@@ -32,27 +20,18 @@ const AIRTABLE_API = "https://api.airtable.com/v0";
 
 function getDebugPayload() {
   return {
-    routeVersion: ROUTE_VERSION,
-    inboundBaseId,
-    inboundOppTable,
-    inboundCompanyTable,
-    fallbackBaseId,
-    fallbackOppTable,
-    fallbackCompanyTable,
-    usedBaseId,
-    usedOppTable,
-    usedCompanyTable,
-    inboundViewUrl: process.env.AIRTABLE_INBOUND_OPP_VIEW_URL || "",
+    base: INBOUND_BASE_ID,
+    oppTable: INBOUND_OPP_TABLE,
+    companyTable: INBOUND_COMPANY_TABLE,
+    viewUrl: process.env.AIRTABLE_INBOUND_OPP_VIEW_URL || "",
   };
 }
 
 export async function POST(req: Request) {
-  // Log to prove we're writing to OS, not DB
-  console.log("GMAIL INBOUND DEBUG", {
-    ROUTE_VERSION,
-    usedBaseId,
-    usedOppTable,
-    usedCompanyTable,
+  console.log("GMAIL INBOUND → OS (APP ROUTER)", {
+    base: INBOUND_BASE_ID,
+    oppTable: INBOUND_OPP_TABLE,
+    companyTable: INBOUND_COMPANY_TABLE,
   });
 
   try {
@@ -111,7 +90,7 @@ export async function POST(req: Request) {
     // 1. Find or create Company in Client PM OS
     let companyRecordId: string | null = null;
 
-    const companySearchUrl = `${AIRTABLE_API}/${usedBaseId}/${usedCompanyTable}?filterByFormula=${encodeURIComponent(
+    const companySearchUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
       `{Name}="${companyName.replace(/"/g, '\\"')}"`
     )}&maxRecords=1`;
 
@@ -121,7 +100,7 @@ export async function POST(req: Request) {
     if (companySearchData.records?.length > 0) {
       companyRecordId = companySearchData.records[0].id;
     } else {
-      const createCompanyRes = await fetch(`${AIRTABLE_API}/${usedBaseId}/${usedCompanyTable}`, {
+      const createCompanyRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -148,7 +127,7 @@ export async function POST(req: Request) {
       if (source) opportunityFields["Source"] = source;
       if (notes) opportunityFields["Notes"] = notes;
 
-      const createOppRes = await fetch(`${AIRTABLE_API}/${usedBaseId}/${usedOppTable}`, {
+      const createOppRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_OPP_TABLE}`, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields: opportunityFields }),

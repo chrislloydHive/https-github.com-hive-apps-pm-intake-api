@@ -8,24 +8,11 @@ import { NextResponse } from "next/server";
  * Requires AIRTABLE_INBOUND_* env vars - no fallback to DB vars.
  */
 
-const ROUTE_VERSION = "gmail-inbound-company-os-debug-001";
+// Client PM OS env vars - NO DB FALLBACKS
+const INBOUND_BASE_ID = process.env.AIRTABLE_INBOUND_BASE_ID;
+const INBOUND_COMPANY_TABLE = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES;
 
-// Inbound-specific env vars (MUST be set)
-const inboundBaseId = process.env.AIRTABLE_INBOUND_BASE_ID || "";
-const inboundOppTable = process.env.AIRTABLE_INBOUND_TABLE_OPPORTUNITIES || "";
-const inboundCompanyTable = process.env.AIRTABLE_INBOUND_TABLE_COMPANIES || "";
-
-// Fallback env vars (should NOT be used, but captured for debug)
-const fallbackBaseId = process.env.AIRTABLE_BASE_ID || "";
-const fallbackOppTable = process.env.AIRTABLE_TABLE_OPPORTUNITIES || "";
-const fallbackCompanyTable = process.env.AIRTABLE_TABLE_COMPANIES || "";
-
-// ACTUAL IDs used for writes - NO FALLBACK, inbound only
-const usedBaseId = inboundBaseId;
-const usedOppTable = inboundOppTable;
-const usedCompanyTable = inboundCompanyTable;
-
-if (!usedBaseId || !usedCompanyTable) {
+if (!INBOUND_BASE_ID || !INBOUND_COMPANY_TABLE) {
   throw new Error("Gmail inbound misconfigured: AIRTABLE_INBOUND_* env vars missing");
 }
 
@@ -33,26 +20,15 @@ const AIRTABLE_API = "https://api.airtable.com/v0";
 
 function getDebugPayload() {
   return {
-    routeVersion: ROUTE_VERSION,
-    inboundBaseId,
-    inboundOppTable,
-    inboundCompanyTable,
-    fallbackBaseId,
-    fallbackOppTable,
-    fallbackCompanyTable,
-    usedBaseId,
-    usedOppTable,
-    usedCompanyTable,
-    inboundViewUrl: process.env.AIRTABLE_INBOUND_OPP_VIEW_URL || "",
+    base: INBOUND_BASE_ID,
+    companyTable: INBOUND_COMPANY_TABLE,
   };
 }
 
 export async function POST(req: Request) {
-  // Log to prove we're writing to OS, not DB
-  console.log("GMAIL INBOUND COMPANY DEBUG", {
-    ROUTE_VERSION,
-    usedBaseId,
-    usedCompanyTable,
+  console.log("GMAIL INBOUND COMPANY → OS (APP ROUTER)", {
+    base: INBOUND_BASE_ID,
+    companyTable: INBOUND_COMPANY_TABLE,
   });
 
   try {
@@ -101,7 +77,7 @@ export async function POST(req: Request) {
     };
 
     // Search for existing company in Client PM OS
-    const searchUrl = `${AIRTABLE_API}/${usedBaseId}/${usedCompanyTable}?filterByFormula=${encodeURIComponent(
+    const searchUrl = `${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}?filterByFormula=${encodeURIComponent(
       `{Name}="${companyName.replace(/"/g, '\\"')}"`
     )}&maxRecords=1`;
 
@@ -120,7 +96,7 @@ export async function POST(req: Request) {
       if (industry) fields["Industry"] = industry;
       if (notes) fields["Notes"] = notes;
 
-      const createRes = await fetch(`${AIRTABLE_API}/${usedBaseId}/${usedCompanyTable}`, {
+      const createRes = await fetch(`${AIRTABLE_API}/${INBOUND_BASE_ID}/${INBOUND_COMPANY_TABLE}`, {
         method: "POST",
         headers,
         body: JSON.stringify({ fields }),
