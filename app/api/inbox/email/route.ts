@@ -57,14 +57,14 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 // Helpers
 // ============================================================================
 
-function getDebugPayload() {
+function getDebugPayload(): InboxEmailResponse["_debug"] {
   if (IS_PRODUCTION) return undefined;
   return {
-    baseId: AIRTABLE_OS_BASE_ID,
+    baseId: AIRTABLE_OS_BASE_ID || "",
     tables: {
-      companies: AIRTABLE_OS_TABLE_COMPANIES,
-      opportunities: AIRTABLE_OS_TABLE_OPPORTUNITIES,
-      inboxItems: AIRTABLE_OS_TABLE_INBOX_ITEMS,
+      companies: AIRTABLE_OS_TABLE_COMPANIES || "",
+      opportunities: AIRTABLE_OS_TABLE_OPPORTUNITIES || "",
+      inboxItems: AIRTABLE_OS_TABLE_INBOX_ITEMS || "",
     },
   };
 }
