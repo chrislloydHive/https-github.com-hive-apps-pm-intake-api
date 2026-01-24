@@ -24,6 +24,49 @@ function checkEnvVars(): string | null {
 
 const AIRTABLE_API = "https://api.airtable.com/v0";
 
+/**
+ * Assert that a value is a valid Airtable record ID (starts with "rec").
+ * Throws with a clear error message if not.
+ */
+function assertValidRecordId(
+  value: unknown,
+  context: string,
+  marker: string
+): asserts value is string {
+  if (typeof value !== "string") {
+    console.error("INVALID_RECORD_ID", {
+      marker,
+      context,
+      value,
+      type: typeof value,
+      expected: "string starting with 'rec'",
+    });
+    throw new Error(
+      `${context}: expected Airtable record ID (rec...), got ${typeof value}: ${JSON.stringify(value)}`
+    );
+  }
+
+  if (!value.startsWith("rec")) {
+    console.error("INVALID_RECORD_ID", {
+      marker,
+      context,
+      value,
+      startsWithRec: false,
+      startsWithTbl: value.startsWith("tbl"),
+      startsWithApp: value.startsWith("app"),
+      expected: "string starting with 'rec'",
+    });
+    throw new Error(
+      `${context}: expected Airtable record ID (rec...), got '${value}'. ` +
+        (value.startsWith("tbl")
+          ? "This looks like a TABLE ID, not a record ID. Check that you're using .id from the record, not the table ID from env vars."
+          : value.startsWith("app")
+          ? "This looks like a BASE ID, not a record ID."
+          : "This does not look like an Airtable record ID.")
+    );
+  }
+}
+
 function getDebugPayload() {
   return {
     base: INBOUND_BASE_ID,
@@ -150,6 +193,7 @@ async function getOrCreateCompany(
 
   if (searchData1.records?.length > 0) {
     const recordId = searchData1.records[0].id;
+    assertValidRecordId(recordId, "Company lookup by normalizedDomain_text", marker);
     console.log("COMPANY_FOUND_BY_NORMALIZED_DOMAIN", { marker, recordId, normalizedDomain });
     return { recordId, created: false, matchedBy: "normalizedDomain_text" };
   }
@@ -164,6 +208,7 @@ async function getOrCreateCompany(
 
   if (searchData2.records?.length > 0) {
     const recordId = searchData2.records[0].id;
+    assertValidRecordId(recordId, "Company lookup by domain", marker);
     console.log("COMPANY_FOUND_BY_DOMAIN", { marker, recordId, normalizedDomain });
     return { recordId, created: false, matchedBy: "domain" };
   }
@@ -197,6 +242,7 @@ async function getOrCreateCompany(
   }
 
   const recordId = createData.id;
+  assertValidRecordId(recordId, "Company create response", marker);
   console.log("COMPANY_CREATED", { marker, recordId, normalizedDomain });
 
   return { recordId, created: true };
