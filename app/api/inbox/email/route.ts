@@ -91,6 +91,43 @@ function errorResponse(
 }
 
 // ============================================================================
+// Assertion Helpers
+// ============================================================================
+
+/**
+ * Assert that a value is a valid Airtable record ID (starts with "rec").
+ * Throws a clear error if invalid.
+ */
+function assertRecordId(id: unknown, fieldName: string): asserts id is string {
+  if (typeof id !== "string") {
+    throw new Error(
+      `Invalid ${fieldName}: expected string, got ${typeof id}. ` +
+      `Airtable linked fields require record IDs starting with "rec".`
+    );
+  }
+  if (!id.startsWith("rec")) {
+    throw new Error(
+      `Invalid ${fieldName}: "${id}" does not start with "rec". ` +
+      `Airtable linked fields require record IDs like "recXXXXXXXXXXXXXX".`
+    );
+  }
+  if (id.length < 10) {
+    throw new Error(
+      `Invalid ${fieldName}: "${id}" is too short to be a valid Airtable record ID.`
+    );
+  }
+}
+
+/**
+ * Wrap a record ID in an array for Airtable linked fields.
+ * Validates the ID first.
+ */
+function asLinkedRecordArray(id: string, fieldName: string): string[] {
+  assertRecordId(id, fieldName);
+  return [id];
+}
+
+// ============================================================================
 // Core Business Logic
 // ============================================================================
 
@@ -264,7 +301,7 @@ async function createInboxItem(
     "From Email": payload.from.email,
     Domain: domain,
     Disposition: disposition,
-    Company: [companyId],
+    Company: asLinkedRecordArray(companyId, "Company (Inbox Item)"),
   };
 
   if (payload.gmailUrl) fields["Gmail URL"] = payload.gmailUrl;
@@ -272,7 +309,7 @@ async function createInboxItem(
   if (payload.bodyText) fields["Body Text"] = payload.bodyText.slice(0, 10000); // Limit size
   if (payload.from.name) fields["From Name"] = payload.from.name;
   if (payload.receivedAt) fields["Received At"] = payload.receivedAt;
-  if (opportunityId) fields["Opportunity"] = [opportunityId];
+  if (opportunityId) fields["Opportunity"] = asLinkedRecordArray(opportunityId, "Opportunity (Inbox Item)");
 
   // Store raw payload for debugging
   fields["Raw Payload"] = JSON.stringify(payload).slice(0, 50000);
@@ -331,7 +368,7 @@ async function createOpportunity(
 
   const fields: OpportunityFields = {
     "Opportunity Name": opportunityName,
-    Company: [companyId],
+    Company: asLinkedRecordArray(companyId, "Company (Opportunity)"),
     Stage: "Qualification",
     "Source System": "OS – Gmail Inbox",
     "Gmail Thread ID": gmailThreadId,
