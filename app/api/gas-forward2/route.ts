@@ -47,14 +47,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    let body: GasForwardPayload | null = null;
+    let body: GasForwardPayload;
     try {
       body = await req.json();
     } catch {
       return NextResponse.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
     }
 
-    const gasUrl = String(body?.gasUrl || "");
+    if (!body || typeof body !== "object") {
+      return NextResponse.json({ ok: false, error: "Invalid payload" }, { status: 400 });
+    }
+
+    const gasUrl = String(body.gasUrl || "");
     if (!gasUrl) {
       return NextResponse.json({ ok: false, error: "Missing gasUrl" }, { status: 400 });
     }
