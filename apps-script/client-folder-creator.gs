@@ -1,10 +1,15 @@
 /**
  * Client Folder Creator - Google Apps Script Web App
  *
- * Creates client/project folders in Google Drive with deterministic routing:
- * 1. If bucketRootFolderId provided → use it (explicit)
- * 2. If clientType === "prospect" → NEW_BUSINESS_ROOT_FOLDER_ID (derived)
- * 3. Otherwise → WORK_ROOT_FOLDER_ID (default)
+ * Creates client/project folders in Google Drive.
+ *
+ * PRIORITY ORDER for parent folder selection:
+ * 1. parentFolderId (HIGHEST - if provided, ALWAYS use it)
+ * 2. clientType === "prospect" → NEW_BUSINESS_ROOT_FOLDER_ID
+ * 3. WORK_ROOT_FOLDER_ID (default)
+ *
+ * If a folder with the same name already exists under the chosen parent,
+ * it will be reused instead of creating a duplicate.
  *
  * Deploy as: Web App → Execute as: Me → Access: Anyone
  */
@@ -33,103 +38,142 @@ function doGet() {
 
 /**
  * Main handler - creates folder in correct location
+ *
+ * Expected payload:
+ * {
+ *   recordId: string (required),
+ *   projectName: string (required),
+ *   parentFolderId: string (optional - HIGHEST PRIORITY),
+ *   clientType: string (optional - "prospect" triggers NEW_BUSINESS root)
+ * }
  */
 function doPost(e) {
   try {
-    // Parse input
+    // ==========================================================================
+    // PARSE INPUT
+    // ==========================================================================
     var raw = e && e.postData && e.postData.contents ? e.postData.contents : "{}";
     var input = JSON.parse(raw);
 
+    // Log raw input for debugging
+    Logger.log("Raw input: " + raw);
+
     // ==========================================================================
-    // NORMALIZE INPUT - Support multiple field naming conventions
+    // EXTRACT FIELDS - Support multiple naming conventions
     // ==========================================================================
-    var data = {
-      // Record ID (required)
-      recordId: input.recordId || input.clientRecordId || input.recId || "",
+    var recordId = input.recordId || input.clientRecordId || input.recId || "";
+    var projectName = input.projectName || input.clientName || input.name || "";
+    var clientType = String(input.clientType || input.type || "").toLowerCase().trim();
 
-      // Project/Client name (required)
-      projectName: input.projectName || input.clientName || input.name || "",
+    // CRITICAL: parentFolderId takes HIGHEST PRIORITY
+    // Check all possible field names
+    var parentFolderId = input.parentFolderId || input.bucketRootFolderId || input.rootFolderId || "";
 
-      // Client type for routing (optional)
-      clientType: String(input.clientType || input.type || "").toLowerCase().trim(),
-
-      // Explicit parent folder override (optional - highest priority)
-      bucketRootFolderId: input.bucketRootFolderId || input.parentFolderId || input.rootFolderId || ""
-    };
+    Logger.log("Extracted fields: recordId=" + recordId + ", projectName=" + projectName +
+               ", clientType=" + clientType + ", parentFolderId=" + parentFolderId);
 
     // ==========================================================================
     // VALIDATION
     // ==========================================================================
-    if (!data.recordId) {
+    if (!recordId) {
       return jsonResponse({ ok: false, error: "Missing recordId" });
     }
 
-    if (!data.projectName) {
+    if (!projectName) {
       return jsonResponse({ ok: false, error: "Missing projectName" });
     }
 
     // ==========================================================================
-    // DETERMINISTIC FOLDER ROUTING - The core fix
+    // DETERMINE PARENT FOLDER - parentFolderId has ABSOLUTE PRIORITY
     // ==========================================================================
-    var routingRule = "default";
-    var rootFolderId;
+    var chosenParentId;
+    var routingRule;
 
-    // Rule 1: Explicit bucketRootFolderId always wins
-    if (data.bucketRootFolderId) {
-      rootFolderId = data.bucketRootFolderId;
-      routingRule = "explicit";
+    // RULE 1: If parentFolderId is provided, ALWAYS use it - no exceptions
+    if (parentFolderId && parentFolderId.trim() !== "") {
+      chosenParentId = parentFolderId.trim();
+      routingRule = "explicit-parentFolderId";
+      Logger.log("Using explicit parentFolderId: " + chosenParentId);
     }
-    // Rule 2: Prospects go to NEW_BUSINESS
-    else if (data.clientType === "prospect") {
-      rootFolderId = CONFIG.NEW_BUSINESS_ROOT_FOLDER_ID;
+    // RULE 2: Prospects go to NEW_BUSINESS (only if no parentFolderId)
+    else if (clientType === "prospect") {
+      chosenParentId = CONFIG.NEW_BUSINESS_ROOT_FOLDER_ID;
       routingRule = "derived-prospect";
+      Logger.log("Using prospect root: " + chosenParentId);
     }
-    // Rule 3: Everything else goes to WORK
+    // RULE 3: Default to WORK root (only if no parentFolderId)
     else {
-      rootFolderId = CONFIG.WORK_ROOT_FOLDER_ID;
+      chosenParentId = CONFIG.WORK_ROOT_FOLDER_ID;
       routingRule = "derived-default";
+      Logger.log("Using default work root: " + chosenParentId);
     }
 
     // ==========================================================================
-    // CREATE FOLDER - with safe fallback
+    // GET PARENT FOLDER
     // ==========================================================================
     var parentFolder;
-    var actualRootFolderId = rootFolderId;
+    var actualParentId = chosenParentId;
 
     try {
-      parentFolder = DriveApp.getFolderById(rootFolderId);
+      parentFolder = DriveApp.getFolderById(chosenParentId);
+      Logger.log("Successfully got parent folder: " + parentFolder.getName());
     } catch (folderErr) {
-      // Fallback to root if folder ID is invalid/inaccessible
-      Logger.log("Warning: Could not access folder " + rootFolderId + ", falling back to root");
+      // Only fall back if NOT using explicit parentFolderId
+      // If explicit parentFolderId fails, that's an error - don't silently create elsewhere
+      if (routingRule === "explicit-parentFolderId") {
+        return jsonResponse({
+          ok: false,
+          error: "Cannot access specified parentFolderId: " + chosenParentId,
+          detail: String(folderErr.message || folderErr)
+        });
+      }
+
+      // For derived routes, fall back to root
+      Logger.log("Warning: Could not access folder " + chosenParentId + ", falling back to root");
       parentFolder = DriveApp.getRootFolder();
-      actualRootFolderId = parentFolder.getId();
+      actualParentId = parentFolder.getId();
       routingRule = "fallback-root";
     }
 
-    var newFolder = parentFolder.createFolder(data.projectName);
+    // ==========================================================================
+    // CHECK FOR EXISTING FOLDER (reuse if exists under this parent)
+    // ==========================================================================
+    var existingFolder = findChildFolderByName_(parentFolder, projectName);
+    var reused = false;
+    var targetFolder;
+
+    if (existingFolder) {
+      targetFolder = existingFolder;
+      reused = true;
+      Logger.log("Reusing existing folder: " + targetFolder.getName() + " (" + targetFolder.getId() + ")");
+    } else {
+      targetFolder = parentFolder.createFolder(projectName);
+      Logger.log("Created new folder: " + targetFolder.getName() + " (" + targetFolder.getId() + ")");
+    }
 
     // ==========================================================================
-    // RESPONSE - Include debug info (remove in production)
+    // RESPONSE
     // ==========================================================================
     return jsonResponse({
       ok: true,
-      // Standard fields
-      folderId: newFolder.getId(),
-      folderUrl: newFolder.getUrl(),
+      folderId: targetFolder.getId(),
+      folderUrl: targetFolder.getUrl(),
+      chosenParentId: actualParentId,
+      reused: reused,
       // Echo back for confirmation
-      recordId: data.recordId,
-      projectName: data.projectName,
-      // Debug fields (remove after verification)
+      recordId: recordId,
+      projectName: projectName,
+      // Debug fields
       _debug: {
-        requestedRootFolderId: rootFolderId,
-        actualRootFolderId: actualRootFolderId,
-        clientType: data.clientType || "(not provided)",
-        parentFolderId: data.bucketRootFolderId || "(not provided)",
-        routingRule: routingRule
+        inputParentFolderId: parentFolderId || "(not provided)",
+        inputClientType: clientType || "(not provided)",
+        routingRule: routingRule,
+        parentFolderName: parentFolder.getName()
       }
     });
 
   } catch (err) {
+    Logger.log("Error: " + String(err.message || err));
     return jsonResponse({
       ok: false,
       error: String(err.message || err),
@@ -142,6 +186,29 @@ function doPost(e) {
 // HELPERS
 // =============================================================================
 
+/**
+ * Find a child folder by name within a parent folder
+ * Returns the folder if found, null otherwise
+ *
+ * @param {Folder} parentFolder - The parent folder to search in
+ * @param {string} folderName - The name to search for
+ * @returns {Folder|null} - The found folder or null
+ */
+function findChildFolderByName_(parentFolder, folderName) {
+  try {
+    var folders = parentFolder.getFoldersByName(folderName);
+    if (folders.hasNext()) {
+      return folders.next();
+    }
+  } catch (e) {
+    Logger.log("Error searching for folder: " + e);
+  }
+  return null;
+}
+
+/**
+ * Create JSON response for web app
+ */
 function jsonResponse(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))

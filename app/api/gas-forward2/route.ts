@@ -70,21 +70,31 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Invalid host" }, { status: 400 });
     }
 
+    // Extract gasUrl and forward everything else unchanged
     const { gasUrl: _ignored, ...payload } = body;
+
+    // Explicitly preserve parentFolderId - CRITICAL for folder routing
+    // This ensures it's not accidentally dropped or transformed
+    const forwardPayload = {
+      ...payload,
+      // Re-assert parentFolderId to guarantee it's forwarded if provided
+      ...(body.parentFolderId ? { parentFolderId: body.parentFolderId } : {}),
+    };
 
     // Log what we're forwarding (for debugging)
     console.log("[gas-forward2] Forwarding to GAS:", {
       gasUrl: gasUrl.slice(0, 60) + "...",
-      recordId: payload.recordId || "(missing)",
-      projectName: payload.projectName || "(missing)",
-      parentFolderId: payload.parentFolderId || "(not provided)",
-      clientType: payload.clientType || "(not provided)",
+      recordId: forwardPayload.recordId || "(missing)",
+      projectName: forwardPayload.projectName || "(missing)",
+      parentFolderId: forwardPayload.parentFolderId || "(not provided)",
+      clientType: forwardPayload.clientType || "(not provided)",
+      payloadKeys: Object.keys(forwardPayload),
     });
 
     const upstream = await fetch(gasUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(forwardPayload),
       redirect: "follow",
     });
 
@@ -120,8 +130,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Always return JSON, always include upstreamStatus for debugging
-    return NextResponse.json({ ...parsed, upstreamStatus: upstream.status });
+    // Always return JSON, include debug info
+    return NextResponse.json({
+      ...parsed,
+      upstreamStatus: upstream.status,
+      _forwarded: {
+        parentFolderId: forwardPayload.parentFolderId || null,
+        recordId: forwardPayload.recordId || null,
+        projectName: forwardPayload.projectName || null,
+      },
+    });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "Proxy exception", detail: String(e?.message || e) },
