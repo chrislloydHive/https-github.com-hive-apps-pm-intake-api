@@ -91,9 +91,21 @@ function doPost(e) {
     }
 
     // ==========================================================================
-    // CREATE FOLDER
+    // CREATE FOLDER - with safe fallback
     // ==========================================================================
-    var parentFolder = DriveApp.getFolderById(rootFolderId);
+    var parentFolder;
+    var actualRootFolderId = rootFolderId;
+
+    try {
+      parentFolder = DriveApp.getFolderById(rootFolderId);
+    } catch (folderErr) {
+      // Fallback to root if folder ID is invalid/inaccessible
+      Logger.log("Warning: Could not access folder " + rootFolderId + ", falling back to root");
+      parentFolder = DriveApp.getRootFolder();
+      actualRootFolderId = parentFolder.getId();
+      routingRule = "fallback-root";
+    }
+
     var newFolder = parentFolder.createFolder(data.projectName);
 
     // ==========================================================================
@@ -109,9 +121,10 @@ function doPost(e) {
       projectName: data.projectName,
       // Debug fields (remove after verification)
       _debug: {
-        resolvedRootFolderId: rootFolderId,
+        requestedRootFolderId: rootFolderId,
+        actualRootFolderId: actualRootFolderId,
         clientType: data.clientType || "(not provided)",
-        bucketRootFolderId: data.bucketRootFolderId || "(not provided)",
+        parentFolderId: data.bucketRootFolderId || "(not provided)",
         routingRule: routingRule
       }
     });
