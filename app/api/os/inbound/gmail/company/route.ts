@@ -320,6 +320,15 @@ export async function POST(req: Request) {
       );
     }
 
+    // Log env vars being used (prefixes only for security)
+    console.log("GMAIL_INBOUND_AIRTABLE_CONFIG", {
+      marker,
+      baseId: INBOUND_BASE_ID || "(not set)",
+      baseIdPrefix: (INBOUND_BASE_ID || "").slice(0, 6) + "...",
+      companyTable: INBOUND_COMPANY_TABLE || "(not set)",
+      apiKeyPrefix: apiKey.slice(0, 6) + "...",
+    });
+
     const headers = {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
@@ -356,7 +365,16 @@ export async function POST(req: Request) {
   } catch (e: any) {
     console.error("[os/inbound/gmail/company] Error:", { marker, error: e?.message || e });
     return NextResponse.json(
-      { ok: false, status: "error", error: e?.message || "Internal error", marker },
+      {
+        ok: false,
+        status: "error",
+        error: e?.message || "Internal error",
+        marker,
+        _config: {
+          baseId: INBOUND_BASE_ID ? `${INBOUND_BASE_ID.slice(0, 6)}...` : "(not set)",
+          companyTable: INBOUND_COMPANY_TABLE || "(not set)",
+        },
+      },
       { status: 500 }
     );
   }
