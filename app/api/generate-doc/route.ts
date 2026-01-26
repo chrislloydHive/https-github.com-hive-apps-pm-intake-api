@@ -4,7 +4,7 @@ import Airtable from "airtable";
 import { google } from "googleapis";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2026-01-18-merge-map";
+const BUILD_TAG = "generate-doc-2026-01-26-placeholder-fix";
 
 /**
  * POST /api/generate-doc
@@ -417,24 +417,138 @@ function extractStructuredInputs(body: Record<string, unknown>): StructuredInput
 }
 
 // =============================================================================
-// MERGE MAP EXTRACTION
+// MERGE MAP EXTRACTION & PLACEHOLDER NORMALIZATION
 // =============================================================================
 
-function extractMergeMap(rawBody: Record<string, any>): Record<string, string> {
-  // Check both original and normalized (lowercase) key names
+/**
+ * Normalizes a placeholder key to uppercase without braces.
+ * "{{CONTENT}}" -> "CONTENT"
+ * "content" -> "CONTENT"
+ * "CONTENT" -> "CONTENT"
+ * "  {{PROJECT}}  " -> "PROJECT"
+ */
+function normalizeKey(key: string): string {
+  // Trim first, then remove braces, then trim again and uppercase
+  return key.trim().replace(/^\{\{|\}\}$/g, "").trim().toUpperCase();
+}
+
+/**
+ * Extracts and normalizes all placeholder values from the request body.
+ * Handles multiple payload shapes:
+ * 1. placeholders: { "{{PROJECT}}": "...", "{{CONTENT}}": "..." }
+ * 2. mergeFields: { PROJECT: "...", CONTENT: "..." }
+ * 3. fields / replacements / structuredInputs (same format as mergeFields)
+ *
+ * Returns a normalized map with UPPERCASE keys (no braces):
+ * { PROJECT: "...", CONTENT: "...", INLINE_TABLE: "..." }
+ */
+function normalizeMerge(rawBody: Record<string, any>): Record<string, string> {
+  const out: Record<string, string> = {};
+
+  // 1. Extract from placeholders object (keys like "{{CONTENT}}")
+  const placeholders = rawBody.placeholders || rawBody.Placeholders;
+  if (placeholders && typeof placeholders === "object") {
+    for (const [k, v] of Object.entries(placeholders)) {
+      const normalized = normalizeKey(k);
+      const s = coerceToString(v);
+      if (s !== null && normalized) {
+        out[normalized] = s;
+      }
+    }
+  }
+
+  // 2. Extract from mergeFields/fields/replacements/structuredInputs (keys like "CONTENT" or "content")
   const merge =
     rawBody.mergeFields || rawBody.mergefields ||
     rawBody.fields ||
     rawBody.replacements ||
-    rawBody.structuredInputs || rawBody.structuredinputs ||
-    {};
+    rawBody.structuredInputs || rawBody.structuredinputs;
 
-  if (!merge || typeof merge !== "object") return {};
+  if (merge && typeof merge === "object") {
+    for (const [k, v] of Object.entries(merge)) {
+      const normalized = normalizeKey(k);
+      const s = coerceToString(v);
+      // Only set if not already set from placeholders (placeholders take priority)
+      if (s !== null && normalized && !(normalized in out)) {
+        out[normalized] = s;
+      }
+    }
+  }
 
+  return out;
+}
+
+/**
+ * Builds a placeholders map with {{KEY}} format from a normalized merge map.
+ * Input: { PROJECT: "...", CONTENT: "..." }
+ * Output: { "{{PROJECT}}": "...", "{{CONTENT}}": "..." }
+ */
+function buildPlaceholders(merge: Record<string, string>): Record<string, string> {
+  const placeholders: Record<string, string> = {};
+  for (const [key, value] of Object.entries(merge)) {
+    // Ensure key is uppercase and wrapped in braces
+    const normalizedKey = key.toUpperCase();
+    placeholders[`{{${normalizedKey}}}`] = value;
+  }
+  return placeholders;
+}
+
+/**
+ * Builds Google Docs API batchUpdate replaceAllText requests from placeholders.
+ * @param placeholders Map of "{{KEY}}" -> value
+ * @returns Array of replaceAllText request objects
+ */
+function buildReplaceRequests(placeholders: Record<string, string>): Array<{
+  replaceAllText: {
+    containsText: { text: string; matchCase: boolean };
+    replaceText: string;
+  };
+}> {
+  return Object.entries(placeholders).map(([key, value]) => ({
+    replaceAllText: {
+      containsText: {
+        text: key, // Already in {{KEY}} format
+        matchCase: true,
+      },
+      replaceText: value == null ? "" : String(value),
+    },
+  }));
+}
+
+/**
+ * Logs placeholder information for debugging (safe, no secrets).
+ */
+function logPlaceholderInfo(
+  merge: Record<string, string>,
+  requestId: string
+): void {
+  const keys = Object.keys(merge);
+  const contentLength = merge.CONTENT?.length || 0;
+  const inlineTableLength = merge.INLINE_TABLE?.length || 0;
+
+  console.log(`[generate-doc][${requestId}] Placeholder keys being replaced: ${keys.join(", ") || "(none)"}`);
+  console.log(`[generate-doc][${requestId}] CONTENT length: ${contentLength}, INLINE_TABLE length: ${inlineTableLength}`);
+
+  if (!merge.CONTENT && !merge.content) {
+    console.warn(`[generate-doc][${requestId}] WARNING: No CONTENT placeholder value found in payload`);
+  }
+}
+
+/**
+ * @deprecated Use normalizeMerge() instead
+ * Legacy function kept for backwards compatibility during transition.
+ */
+function extractMergeMap(rawBody: Record<string, any>): Record<string, string> {
+  // Delegate to normalizeMerge and convert keys to lowercase for backwards compat
+  const normalized = normalizeMerge(rawBody);
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(merge)) {
-    const s = coerceToString(v);
-    if (s !== null) out[String(k)] = s;
+  for (const [k, v] of Object.entries(normalized)) {
+    // Keep both uppercase and lowercase versions for backwards compat
+    out[k] = v;
+    out[k.toLowerCase()] = v;
+    // Also add with underscores converted (SHORT_OVERVIEW -> short_overview)
+    const underscored = k.toLowerCase().replace(/_/g, "_");
+    out[underscored] = v;
   }
   return out;
 }
@@ -656,43 +770,44 @@ function getGoogleClients() {
 
 /**
  * Replaces all placeholders in a Google Doc using the Docs API.
- * Supports both {{KEY}} format placeholders.
+ * Supports {{KEY}} format placeholders.
  *
  * @param documentId - The Google Doc ID
- * @param placeholders - Map of placeholder key to replacement value
+ * @param placeholders - Map of placeholder key ("{{KEY}}") to replacement value
  * @param requestId - For logging
  */
 async function replaceDocPlaceholders(
   documentId: string,
   placeholders: Record<string, string>,
   requestId: string
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; replacedCount: number } | { ok: false; error: string }> {
   const clients = getGoogleClients();
 
   if (!clients) {
     console.warn(`[generate-doc][${requestId}] Google API credentials not configured - skipping direct replacement`);
-    return { ok: true }; // Not a fatal error - Apps Script may have done it
+    return { ok: true, replacedCount: 0 }; // Not a fatal error - Apps Script may have done it
   }
 
-  // Build batchUpdate requests for each placeholder
-  const requests = Object.entries(placeholders).map(([key, value]) => ({
-    replaceAllText: {
-      containsText: {
-        text: key, // Already in {{KEY}} format
-        matchCase: true,
-      },
-      replaceText: value == null ? "" : String(value),
-    },
-  }));
+  // Build batchUpdate requests using the helper function
+  const requests = buildReplaceRequests(placeholders);
 
   if (requests.length === 0) {
     console.log(`[generate-doc][${requestId}] No placeholders to replace`);
-    return { ok: true };
+    return { ok: true, replacedCount: 0 };
+  }
+
+  // Log which placeholders are being replaced (keys only, not values for security)
+  const placeholderKeys = Object.keys(placeholders);
+  console.log(`[generate-doc][${requestId}] Replacing ${requests.length} placeholders via Docs API: ${placeholderKeys.join(", ")}`);
+
+  // Log content/table lengths for debugging
+  const contentLength = placeholders["{{CONTENT}}"]?.length || 0;
+  const inlineTableLength = placeholders["{{INLINE_TABLE}}"]?.length || 0;
+  if (contentLength > 0 || inlineTableLength > 0) {
+    console.log(`[generate-doc][${requestId}] Content lengths - CONTENT: ${contentLength} chars, INLINE_TABLE: ${inlineTableLength} chars`);
   }
 
   try {
-    console.log(`[generate-doc][${requestId}] Replacing ${requests.length} placeholders via Docs API`);
-
     const response = await clients.docs.documents.batchUpdate({
       documentId,
       requestBody: { requests },
@@ -701,7 +816,7 @@ async function replaceDocPlaceholders(
     const repliesCount = response.data.replies?.length || 0;
     console.log(`[generate-doc][${requestId}] Docs API batchUpdate complete: ${repliesCount} replacements processed`);
 
-    return { ok: true };
+    return { ok: true, replacedCount: repliesCount };
   } catch (error: any) {
     console.error(`[generate-doc][${requestId}] Docs API batchUpdate failed:`, error?.message);
     return { ok: false, error: `Docs API replacement failed: ${error?.message}` };
@@ -925,7 +1040,12 @@ export async function POST(req: Request) {
   const normalizedBody = normalizeKeysToLowercase(rawBody);
 
   // Pull canonical merge map BEFORE coercion/zod, so Airtable automation mergeFields works
-  const merge = extractMergeMap(normalizedBody as Record<string, any>);
+  // normalizeMerge handles both placeholders: { "{{CONTENT}}": "..." } and mergeFields: { CONTENT: "..." }
+  const mergeNormalized = normalizeMerge(rawBody as Record<string, any>);
+  const merge = extractMergeMap(normalizedBody as Record<string, any>); // Legacy for backwards compat
+
+  // Log placeholder info for debugging
+  logPlaceholderInfo(mergeNormalized, requestId);
 
   const body = coerceRequestBody(normalizedBody);
   const parseResult = InputSchema.safeParse(body);
@@ -949,22 +1069,23 @@ export async function POST(req: Request) {
   // MODE DETECTION: Direct placeholders vs GPT polish
   // Direct mode: when content field is provided (from Airtable Automation)
   // ---------------------------------------------------------------------------
-  // Keys are normalized to lowercase, so we only check lowercase variants
+  // Check both input fields and mergeNormalized (uppercase keys from normalizeMerge)
   const isDirectMode =
     hasMeaningfulText(input.content) ||
     hasMeaningfulText(input.sourceText) ||
     hasMeaningfulText(input.body) ||
     hasMeaningfulText(input.text) ||
     hasMeaningfulText(input.notes) ||
-    hasMeaningfulText(merge.content) ||   // Normalized from CONTENT
+    hasMeaningfulText(mergeNormalized.CONTENT) ||       // From placeholders or mergeFields
+    hasMeaningfulText(merge.content) ||                 // Legacy lowercase
     hasMeaningfulText(input.inlineTable) ||
-    hasMeaningfulText(merge.inlinetable) || // Normalized from INLINE_TABLE
+    hasMeaningfulText(mergeNormalized.INLINE_TABLE) ||  // From placeholders or mergeFields
     hasMeaningfulText(input.project) ||
-    hasMeaningfulText(merge.project);      // Normalized from PROJECT
+    hasMeaningfulText(mergeNormalized.PROJECT);         // From placeholders or mergeFields
 
   console.log(`[generate-doc][${requestId}] Mode: ${isDirectMode ? "DIRECT" : "GPT"}`);
   console.log(`[generate-doc][${requestId}] Input fields: content=${!!input.content}, sourceNotes=${!!input.sourceNotes}, project=${!!input.project}, inlineTable=${!!input.inlineTable}`);
-  console.log(`[generate-doc][${requestId}] Merge fields: content=${!!merge.content}, project=${!!merge.project}`);
+  console.log(`[generate-doc][${requestId}] Merge fields (normalized): CONTENT=${!!mergeNormalized.CONTENT}, PROJECT=${!!mergeNormalized.PROJECT}, INLINE_TABLE=${!!mergeNormalized.INLINE_TABLE}`);
 
   // ---------------------------------------------------------------------------
   // FOLDER RESOLUTION: input.destinationFolderId > PREPARED_DOCUMENTS_FOLDER_ID > projectFolderId
@@ -1042,70 +1163,104 @@ export async function POST(req: Request) {
   const finalGeneratedAt = input.generatedAt?.trim() || generatedAt;
 
   // Resolve inlineTable from either field (used in both modes)
-  finalInlineTable = input.inlineTable || input.inlineTableText || null;
+  // Priority: input fields > mergeNormalized (from placeholders/mergeFields) > legacy merge
+  finalInlineTable =
+    input.inlineTable ||
+    input.inlineTableText ||
+    mergeNormalized.INLINE_TABLE ||  // From placeholders: {"{{INLINE_TABLE}}": "..."} or mergeFields: {INLINE_TABLE: "..."}
+    merge.inline_table ||            // Legacy lowercase
+    null;
 
   if (isDirectMode) {
     // ---------------------------------------------------------------------------
     // DIRECT MODE: Use provided placeholders directly (skip GPT)
-    // Keys are normalized to lowercase by normalizeKeysToLowercase()
+    // mergeNormalized has uppercase keys from normalizeMerge()
+    // merge has lowercase keys from legacy extractMergeMap()
     // ---------------------------------------------------------------------------
+
+    // PROJECT: Prefer from placeholders/mergeFields (may include job# prefix)
     finalProject =
+      mergeNormalized.PROJECT ||     // From placeholders: {"{{PROJECT}}": "..."} or mergeFields: {PROJECT: "..."}
       input.project ||
-      merge.project ||        // Normalized from PROJECT
+      merge.project ||               // Legacy lowercase
       input.projectName ||
       null;
 
+    // CLIENT
     finalClient =
+      mergeNormalized.CLIENT ||
       input.client ||
-      merge.client ||         // Normalized from CLIENT
+      merge.client ||
       input.clientName ||
       null;
 
+    // HEADER
     finalHeader =
+      mergeNormalized.HEADER ||
       input.header ||
-      merge.header ||         // Normalized from HEADER
+      merge.header ||
       null;
 
+    // SHORT_OVERVIEW
     finalShortOverview =
+      mergeNormalized.SHORT_OVERVIEW ||
       input.shortOverview ||
-      merge.short_overview || // Normalized from SHORT_OVERVIEW
+      merge.short_overview ||
       null;
 
-    finalInlineTable =
-      input.inlineTable ||
-      input.inlineTableText ||
-      merge.inline_table ||   // Normalized from INLINE_TABLE
-      merge.inlinetable ||    // Normalized from INLINETABLE
-      null;
+    // INLINE_TABLE (already set above, but override if direct mode has more specific value)
+    if (!finalInlineTable) {
+      finalInlineTable =
+        mergeNormalized.INLINE_TABLE ||
+        input.inlineTable ||
+        input.inlineTableText ||
+        merge.inline_table ||
+        merge.inlinetable ||
+        null;
+    }
 
-    // Content: prefer direct content, then merge content, then sourceNotes, else single space
+    // CONTENT: prefer placeholders/mergeFields, then input fields, then sourceNotes
+    // This is the key fix - we now properly extract CONTENT from placeholders
     finalContent =
+      mergeNormalized.CONTENT ||     // From placeholders: {"{{CONTENT}}": "..."} or mergeFields: {CONTENT: "..."}
       input.content ||
       input.sourceText ||
       input.body ||
       input.text ||
       input.notes ||
-      merge.content ||        // Normalized from CONTENT
+      merge.content ||               // Legacy lowercase
       input.sourceNotes ||
       " ";
 
-    // Title/subtitle
+    // Title/subtitle - use PROJECT value (which may include job# prefix) for doc title
     finalTitle =
       finalProject ||
-      merge.title ||          // Normalized from TITLE
+      mergeNormalized.TITLE ||
+      merge.title ||
       input.projectName ||
       "Untitled Document";
 
     finalSubtitle =
+      mergeNormalized.SUBTITLE ||
       input.subtitle ||
-      merge.subtitle ||       // Normalized from SUBTITLE
+      merge.subtitle ||
       input.header ||
       "";
 
     sourceType = "direct";
 
+    // Enhanced logging for direct mode
     console.log(
-      `[generate-doc][${requestId}] Direct mode: project="${finalProject}", client="${finalClient}", header="${finalHeader?.slice(0, 50)}..."`
+      `[generate-doc][${requestId}] Direct mode values:`
+    );
+    console.log(
+      `[generate-doc][${requestId}]   PROJECT="${finalProject?.slice(0, 80)}${(finalProject?.length || 0) > 80 ? "..." : ""}"`
+    );
+    console.log(
+      `[generate-doc][${requestId}]   CLIENT="${finalClient}", HEADER="${finalHeader?.slice(0, 50)}..."`
+    );
+    console.log(
+      `[generate-doc][${requestId}]   CONTENT length=${finalContent?.length || 0}, INLINE_TABLE length=${finalInlineTable?.length || 0}`
     );
   } else {
     // ---------------------------------------------------------------------------
@@ -1183,7 +1338,7 @@ export async function POST(req: Request) {
     finalClient = input.clientName || null;
   }
 
-  // Doc file name (for Drive)
+  // Doc file name (for Drive) - uses finalTitle which includes job# prefix if PROJECT has it
   const docName = `${finalTitle} — ${new Date().toLocaleDateString("en-US", { timeZone: "America/Los_Angeles" })}`;
 
   // ---------------------------------------------------------------------------
@@ -1199,16 +1354,16 @@ export async function POST(req: Request) {
       generatedAt: finalGeneratedAt,
       content: finalContent,
       docName,
-      // New placeholders
+      // Primary placeholders
       project: finalProject,
       client: finalClient,
       header: finalHeader,
       shortOverview: finalShortOverview,
       inlineTable: finalInlineTable,
-      // Additional placeholders
-      projectNumber: input.projectNumber || merge.project_number || merge.projectnumber || null,
-      startDate: input.startDate || merge.start_date || merge.startdate || null,
-      dueDate: input.dueDate || merge.due_date || merge.duedate || null,
+      // Additional placeholders - use mergeNormalized (uppercase keys) with fallback to legacy
+      projectNumber: mergeNormalized.PROJECT_NUMBER || input.projectNumber || merge.project_number || null,
+      startDate: mergeNormalized.START_DATE || input.startDate || merge.start_date || null,
+      dueDate: mergeNormalized.DUE_DATE || input.dueDate || merge.due_date || null,
     },
     requestId
   );
