@@ -2,10 +2,16 @@ import { NextResponse } from "next/server";
 
 /**
  * Gmail Inbound API - Company Only
+ * POST /api/os/inbound/gmail/company
+ *
  * Creates or finds Companies in Client PM OS Airtable
  *
  * IMPORTANT: This route writes ONLY to Client PM OS, never to the Hive Database.
  * Requires AIRTABLE_INBOUND_* env vars - no fallback to DB vars.
+ *
+ * Authentication (supports BOTH):
+ * - X-Hive-Secret: <HIVE_INBOUND_SECRET>  (Gmail Add-on / Apps Script direct calls)
+ * - Authorization: Bearer <PM_INTAKE_TOKEN>  (Proxy calls)
  *
  * Company lookup uses domain-based matching - does NOT rely on linked-field auto-create.
  */
@@ -66,6 +72,31 @@ async function tracedFetch(
   });
 
   return response;
+}
+
+/**
+ * Dual auth check - supports both X-Hive-Secret and Bearer token
+ * Returns { ok: true, method: "secret" | "bearer" } or { ok: false, error: string }
+ */
+function checkAuth(req: Request): { ok: true; method: "secret" | "bearer" } | { ok: false; error: string } {
+  // Method 1: X-Hive-Secret header (Gmail Add-on / Apps Script)
+  const hiveSecret = req.headers.get("x-hive-secret");
+  const expectedSecret = process.env.HIVE_INBOUND_SECRET;
+
+  if (hiveSecret && expectedSecret && hiveSecret === expectedSecret) {
+    return { ok: true, method: "secret" };
+  }
+
+  // Method 2: Authorization Bearer token (Proxy calls)
+  const authHeader = req.headers.get("authorization");
+  const expectedToken = process.env.PM_INTAKE_TOKEN || process.env.PM_INTAKE_BEARER_TOKEN;
+
+  if (authHeader && expectedToken && authHeader === `Bearer ${expectedToken}`) {
+    return { ok: true, method: "bearer" };
+  }
+
+  // Neither auth method succeeded
+  return { ok: false, error: "Unauthorized: provide X-Hive-Secret or Bearer token" };
 }
 
 /**
@@ -210,29 +241,33 @@ export async function POST(req: Request) {
   const envError = checkEnvVars();
   if (envError) {
     return NextResponse.json(
-      { ok: false, error: envError, _debug: getDebugPayload() },
+      { ok: false, status: "error", error: envError, marker, _debug: getDebugPayload() },
       { status: 500 }
     );
   }
 
   console.log("GMAIL_INBOUND_MARKER", marker);
-  console.log("GMAIL INBOUND COMPANY → OS (APP ROUTER)", {
-    marker,
-    base: INBOUND_BASE_ID,
-    companyTable: INBOUND_COMPANY_TABLE,
-  });
 
   try {
-    // Auth
-    const authHeader = req.headers.get("authorization");
-    const expectedToken = process.env.PM_INTAKE_TOKEN || process.env.PM_INTAKE_BEARER_TOKEN;
-
-    if (!expectedToken || !authHeader || authHeader !== `Bearer ${expectedToken}`) {
+    // Dual auth check - supports both X-Hive-Secret and Bearer token
+    const authResult = checkAuth(req);
+    if (!authResult.ok) {
+      console.log("GMAIL_INBOUND_AUTH_FAILED", { marker, error: authResult.error });
       return NextResponse.json(
-        { ok: false, error: "Unauthorized", _debug: getDebugPayload() },
+        { ok: false, status: "error", error: authResult.error, marker },
         { status: 401 }
       );
     }
+
+    // Log which auth method was used
+    console.log("GMAIL_INBOUND_AUTH_OK", { marker, authMethod: authResult.method });
+
+    console.log("GMAIL INBOUND COMPANY → OS (APP ROUTER)", {
+      marker,
+      authMethod: authResult.method,
+      base: INBOUND_BASE_ID,
+      companyTable: INBOUND_COMPANY_TABLE,
+    });
 
     // Parse body
     let body: any;
@@ -240,7 +275,7 @@ export async function POST(req: Request) {
       body = await req.json();
     } catch {
       return NextResponse.json(
-        { ok: false, error: "Invalid JSON", _debug: getDebugPayload() },
+        { ok: false, status: "error", error: "Invalid JSON", marker },
         { status: 400 }
       );
     }
@@ -261,9 +296,10 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           ok: false,
+          status: "error",
           error: "Missing or invalid email/domain. Cannot determine company domain.",
           hint: "Provide email (sender email) or domain field",
-          _debug: getDebugPayload(),
+          marker,
         },
         { status: 400 }
       );
@@ -279,7 +315,7 @@ export async function POST(req: Request) {
     const apiKey = process.env.AIRTABLE_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
-        { ok: false, error: "Missing AIRTABLE_API_KEY", _debug: getDebugPayload() },
+        { ok: false, status: "error", error: "Missing AIRTABLE_API_KEY", marker },
         { status: 500 }
       );
     }
@@ -306,7 +342,8 @@ export async function POST(req: Request) {
     });
 
     return NextResponse.json({
-      status: "success",
+      ok: true,
+      status: companyResult.created ? "created" : "existing",
       marker,
       company: {
         id: companyResult.recordId,
@@ -315,12 +352,11 @@ export async function POST(req: Request) {
         created: companyResult.created,
         matchedBy: companyResult.matchedBy,
       },
-      _debug: getDebugPayload(),
     });
   } catch (e: any) {
-    console.error("[os/inbound/gmail/company] Error:", e);
+    console.error("[os/inbound/gmail/company] Error:", { marker, error: e?.message || e });
     return NextResponse.json(
-      { ok: false, error: e?.message || "Internal error", _debug: getDebugPayload() },
+      { ok: false, status: "error", error: e?.message || "Internal error", marker },
       { status: 500 }
     );
   }
@@ -329,7 +365,14 @@ export async function POST(req: Request) {
 export async function GET() {
   return NextResponse.json({
     ok: true,
-    route: "os/inbound/gmail/company",
-    _debug: getDebugPayload(),
+    route: "/api/os/inbound/gmail/company",
+    description: "Gmail inbound - Company only",
+    auth: {
+      supports: ["x-hive-secret", "bearer"],
+      headers: {
+        "x-hive-secret": "HIVE_INBOUND_SECRET env var",
+        "authorization": "Bearer <PM_INTAKE_TOKEN or PM_INTAKE_BEARER_TOKEN>",
+      },
+    },
   });
 }
