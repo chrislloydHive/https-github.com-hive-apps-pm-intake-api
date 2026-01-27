@@ -4,7 +4,7 @@ import Airtable from "airtable";
 import { google } from "googleapis";
 
 // Build tag for debugging deployed versions
-const BUILD_TAG = "generate-doc-2026-01-26-placeholder-fix";
+const BUILD_TAG = "generate-doc-2026-01-26-doc-name-fix";
 
 /**
  * POST /api/generate-doc
@@ -864,7 +864,7 @@ async function renameDocument(
  * Calls Apps Script to:
  * 1. Copy the template doc to the destination folder
  * 2. Replace placeholders:
- *    {{PROJECT}}, {{CLIENT}}, {{HEADER}}, {{SHORT_OVERVIEW}}, {{CONTENT}}, {{INLINE_TABLE}}, {{GENERATED_AT}}
+ *    {{PROJECT}}, {{CLIENT}}, {{HEADER}}, {{SHORT_OVERVIEW}}, {{CONTENT}}, {{INLINE_TABLE}}, {{GENERATED_AT}}, {{DOC_NAME}}
  *    Legacy: {{TITLE}}, {{SUBTITLE}}
  * 3. Return docId, docUrl, pdfUrl
  */
@@ -888,6 +888,9 @@ async function createDocFromTemplate(
     projectNumber?: string | null;
     startDate?: string | null;
     dueDate?: string | null;
+    docNameField?: string | null; // For {{DOC_NAME}} placeholder
+    // Pass-through: raw incoming placeholders from Airtable (to support extra keys)
+    rawIncomingPlaceholders?: Record<string, string> | null;
   },
   requestId: string
 ): Promise<{ ok: true; docId: string; docUrl: string; pdfUrl: string } | { ok: false; error: string }> {
@@ -901,8 +904,11 @@ async function createDocFromTemplate(
   const contentValue = params.content || " "; // Single space if empty to avoid replacement issues
   const inlineTableValue = params.inlineTable || ""; // Empty string if not provided
 
+  // Start with raw incoming placeholders if provided (pass-through for extra keys)
+  // This ensures any placeholders from Airtable that we don't explicitly handle still get forwarded
   const placeholders: Record<string, string> = {
-    // Primary placeholders (from Airtable Automation)
+    ...(params.rawIncomingPlaceholders || {}),
+    // Primary placeholders (from Airtable Automation) - override raw values with explicit params
     "{{PROJECT}}": params.project || params.title || "",
     "{{CLIENT}}": params.client || "",
     "{{HEADER}}": params.header || "",
@@ -914,6 +920,7 @@ async function createDocFromTemplate(
     "{{PROJECT_NUMBER}}": params.projectNumber || "",
     "{{START_DATE}}": params.startDate || "",
     "{{DUE_DATE}}": params.dueDate || "",
+    "{{DOC_NAME}}": params.docNameField || params.docName || "",
     // Legacy placeholders (backward compatibility)
     "{{TITLE}}": params.title || "",
     "{{SUBTITLE}}": params.subtitle || "",
@@ -924,6 +931,16 @@ async function createDocFromTemplate(
     .filter(([_, v]) => v && v.trim() !== "")
     .map(([k, _]) => k);
   console.log(`[generate-doc][${requestId}] Placeholders present: ${populatedKeys.join(", ")}`);
+
+  // Specifically log DOC_NAME for debugging
+  const docNameValue = placeholders["{{DOC_NAME}}"];
+  console.log(`[generate-doc][${requestId}] DOC_NAME forwarded: ${docNameValue ? `"${docNameValue.slice(0, 80)}${docNameValue.length > 80 ? "..." : ""}"` : "(empty)"}`);
+  if (params.rawIncomingPlaceholders) {
+    const extraKeys = Object.keys(params.rawIncomingPlaceholders).filter(k => !placeholders[k] || placeholders[k] === params.rawIncomingPlaceholders![k]);
+    if (extraKeys.length > 0) {
+      console.log(`[generate-doc][${requestId}] Pass-through placeholders from payload: ${extraKeys.join(", ")}`);
+    }
+  }
 
   const payload = {
     action: "createFromTemplate",
@@ -1341,6 +1358,22 @@ export async function POST(req: Request) {
   // Doc file name (for Drive) - uses finalTitle which includes job# prefix if PROJECT has it
   const docName = `${finalTitle} — ${new Date().toLocaleDateString("en-US", { timeZone: "America/Los_Angeles" })}`;
 
+  // Extract DOC_NAME from normalized merge or top-level fields
+  const finalDocNameField =
+    mergeNormalized.DOC_NAME ||
+    (rawBody as Record<string, any>).docNameField ||
+    (rawBody as Record<string, any>).DOC_NAME ||
+    (rawBody as Record<string, any>).docName ||
+    null;
+
+  // Extract raw incoming placeholders to pass through (for extra keys we don't explicitly handle)
+  const rawIncomingPlaceholders = (rawBody as Record<string, any>).placeholders ||
+    (rawBody as Record<string, any>).Placeholders ||
+    null;
+
+  // Log DOC_NAME extraction for debugging
+  console.log(`[generate-doc][${requestId}] DOC_NAME extraction: mergeNormalized.DOC_NAME=${!!mergeNormalized.DOC_NAME}, rawBody.docNameField=${!!(rawBody as any).docNameField}, final=${!!finalDocNameField}`);
+
   // ---------------------------------------------------------------------------
   // CREATE DOC FROM TEMPLATE
   // ---------------------------------------------------------------------------
@@ -1364,6 +1397,10 @@ export async function POST(req: Request) {
       projectNumber: mergeNormalized.PROJECT_NUMBER || input.projectNumber || merge.project_number || null,
       startDate: mergeNormalized.START_DATE || input.startDate || merge.start_date || null,
       dueDate: mergeNormalized.DUE_DATE || input.dueDate || merge.due_date || null,
+      // DOC_NAME placeholder
+      docNameField: finalDocNameField,
+      // Pass-through: raw incoming placeholders from Airtable (supports extra keys not in whitelist)
+      rawIncomingPlaceholders: rawIncomingPlaceholders as Record<string, string> | null,
     },
     requestId
   );
@@ -1415,6 +1452,9 @@ export async function POST(req: Request) {
       title: finalTitle.slice(0, 100),
       sourceType,
       inputsUsed: inputsUsed.length > 0 ? inputsUsed : undefined,
+      docNameForwarded: !!finalDocNameField,
+      docNameValue: finalDocNameField ? finalDocNameField.slice(0, 80) : null,
+      rawPlaceholdersPassedThrough: rawIncomingPlaceholders ? Object.keys(rawIncomingPlaceholders).length : 0,
     },
   });
 }
