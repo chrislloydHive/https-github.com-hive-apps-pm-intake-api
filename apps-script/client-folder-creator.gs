@@ -26,6 +26,31 @@ var CONFIG = {
 };
 
 // =============================================================================
+// SUBFOLDER TEMPLATES
+// =============================================================================
+
+/**
+ * Subfolders to create for CLIENT folders (top-level company folders)
+ */
+var CLIENT_SUBFOLDERS = [
+  "1. Strategy & Planning",
+  "2. Creative & Assets",
+  "3. Campaign Reports",
+  "4. Contracts & Finance",
+  "5. Meeting Notes"
+];
+
+/**
+ * Subfolders to create for PROJECT folders (nested under a client)
+ */
+var PROJECT_SUBFOLDERS = [
+  "Assets",
+  "Deliverables",
+  "Reports",
+  "Notes"
+];
+
+// =============================================================================
 // WEB APP ENDPOINTS
 // =============================================================================
 
@@ -152,6 +177,19 @@ function doPost(e) {
     }
 
     // ==========================================================================
+    // SEED SUBFOLDERS
+    // ==========================================================================
+    // Detect request type:
+    // - If parentFolderId is provided → project folder (nested under client)
+    // - Otherwise → client/prospect folder (top-level)
+    var isProjectFolder = parentFolderId && parentFolderId.trim() !== "";
+    var subfolderTemplate = isProjectFolder ? PROJECT_SUBFOLDERS : CLIENT_SUBFOLDERS;
+    var folderType = isProjectFolder ? "project" : "client";
+
+    Logger.log("Seeding " + folderType + " subfolders: " + subfolderTemplate.join(", "));
+    var subfolderResult = ensureSubfolders_(targetFolder, subfolderTemplate);
+
+    // ==========================================================================
     // RESPONSE
     // ==========================================================================
     return jsonResponse({
@@ -168,7 +206,11 @@ function doPost(e) {
         inputParentFolderId: parentFolderId || "(not provided)",
         inputClientType: clientType || "(not provided)",
         routingRule: routingRule,
-        parentFolderName: parentFolder.getName()
+        parentFolderName: parentFolder.getName(),
+        folderType: folderType,
+        subfolderTemplate: subfolderTemplate,
+        subfoldersCreated: subfolderResult.created,
+        subfoldersSkipped: subfolderResult.skipped
       }
     });
 
@@ -204,6 +246,37 @@ function findChildFolderByName_(parentFolder, folderName) {
     Logger.log("Error searching for folder: " + e);
   }
   return null;
+}
+
+/**
+ * Ensure subfolders exist within a folder
+ * Creates them if missing, skips if they already exist
+ *
+ * @param {Folder} folder - The parent folder to create subfolders in
+ * @param {string[]} subfolderNames - Array of subfolder names to ensure
+ * @returns {Object} - { created: string[], skipped: string[] }
+ */
+function ensureSubfolders_(folder, subfolderNames) {
+  var result = {
+    created: [],
+    skipped: []
+  };
+
+  for (var i = 0; i < subfolderNames.length; i++) {
+    var subfolderName = subfolderNames[i];
+    var existing = findChildFolderByName_(folder, subfolderName);
+
+    if (existing) {
+      result.skipped.push(subfolderName);
+      Logger.log("Subfolder already exists: " + subfolderName);
+    } else {
+      folder.createFolder(subfolderName);
+      result.created.push(subfolderName);
+      Logger.log("Created subfolder: " + subfolderName);
+    }
+  }
+
+  return result;
 }
 
 /**
