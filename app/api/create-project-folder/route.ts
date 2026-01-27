@@ -7,12 +7,55 @@ import { NextResponse } from "next/server";
  * - Airtable Automations cannot follow HTTP redirects
  * - Google Apps Script web apps always return a 302 redirect
  * - This server-side proxy follows the redirect and returns the response directly
+ *
+ * CONFIGURATION:
+ * Set the following environment variable in Vercel:
+ *   GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL = https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
+ *
+ * DEPLOYMENT STEPS:
+ * 1. Deploy your Apps Script as a web app (Execute as: Me, Access: Anyone)
+ * 2. Copy the deployment URL
+ * 3. Set GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL in Vercel Environment Variables
+ * 4. Redeploy the Vercel project
  */
 
-const APPS_SCRIPT_URL =
+// Template folder ID for project folder structure
+const TEMPLATE_FOLDER_ID = "1l2Ksbkoomy7OmuHgrAFM0_r-d9UJgQq4";
+
+// Fallback URL (legacy deployment) - only used if env var is missing
+const FALLBACK_APPS_SCRIPT_URL =
   "https://script.google.com/macros/s/AKfycbz4j2dLWepBYAEXznzuA5Vfxh95ZX7J8CJg_iZnncNpwt4QtP29194z7GImobBPMJrj/exec";
 
+function getAppsScriptUrl(): string {
+  const envUrl = process.env.GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL;
+  if (envUrl && envUrl.trim() !== "") {
+    return envUrl.trim();
+  }
+  console.warn(
+    "[create-project-folder] WARNING: GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL not set, using fallback URL"
+  );
+  return FALLBACK_APPS_SCRIPT_URL;
+}
+
+function truncate(str: string, maxLen: number): string {
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen) + "...[truncated]";
+}
+
+function redactUrl(url: string): string {
+  // Redact the deployment ID portion for logging (show first 20 chars of ID)
+  const match = url.match(/\/macros\/s\/([^/]+)\/exec/);
+  if (match && match[1]) {
+    const id = match[1];
+    const redacted = id.slice(0, 20) + "..." + id.slice(-4);
+    return url.replace(id, redacted);
+  }
+  return url;
+}
+
 export async function POST(req: Request) {
+  const startTime = Date.now();
+
   try {
     let body: any;
     try {
@@ -41,10 +84,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Build payload - include parentFolderId only if provided
-    const payload: { recordId: string; projectName: string; parentFolderId?: string } = {
-      recordId,
-      projectName,
+    // Build payload with all required fields
+    const payload: {
+      recordId: string;
+      projectName: string;
+      templateFolderId: string;
+      parentFolderId?: string;
+    } = {
+      recordId: recordId.trim(),
+      projectName: projectName.trim(),
+      templateFolderId: TEMPLATE_FOLDER_ID,
     };
 
     // Optional: parentFolderId for client-specific folder routing
@@ -54,8 +103,17 @@ export async function POST(req: Request) {
       payload.parentFolderId = parentFolderId.trim();
     }
 
+    // Get the Apps Script URL
+    const appsScriptUrl = getAppsScriptUrl();
+
+    // Log request details
+    console.log("[create-project-folder] ========================================");
+    console.log("[create-project-folder] Apps Script URL:", redactUrl(appsScriptUrl));
+    console.log("[create-project-folder] Payload:", JSON.stringify(payload));
+    console.log("[create-project-folder] ========================================");
+
     // Forward request to Google Apps Script, following redirects
-    const response = await fetch(APPS_SCRIPT_URL, {
+    const response = await fetch(appsScriptUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -65,11 +123,20 @@ export async function POST(req: Request) {
     // Get the response body as text first to handle any content type
     const responseText = await response.text();
     const contentType = response.headers.get("content-type") || "application/json";
+    const elapsed = Date.now() - startTime;
+
+    // Log response details
+    console.log("[create-project-folder] Response status:", response.status);
+    console.log("[create-project-folder] Response content-type:", contentType);
+    console.log("[create-project-folder] Response body:", truncate(responseText, 2000));
+    console.log("[create-project-folder] Elapsed time:", elapsed, "ms");
+    console.log("[create-project-folder] ========================================");
 
     // Try to parse as JSON if applicable
     if (contentType.includes("application/json")) {
       try {
         const jsonData = JSON.parse(responseText);
+        // Return the FULL JSON response from Apps Script (including _debug)
         return NextResponse.json(jsonData, { status: response.status });
       } catch {
         // If parsing fails, return as text
