@@ -78,6 +78,8 @@ curl -X POST http://localhost:3000/api/pm-intake \
 
 Creates Google Drive project folders via Google Apps Script proxy. Handles the 302 redirect that Airtable Automations cannot follow.
 
+**Identifier:** `clientPmProjectRecordId` — the Client PM OS Projects record ID (must start with `rec`). Do NOT pass `hiveOsProjectRecordId` — Client PM OS endpoints require the Client PM OS Projects record ID only.
+
 **Headers:**
 - `Content-Type: application/json`
 - `x-api-key: <AIRTABLE_PROXY_SECRET>` (or `Authorization: Bearer <AIRTABLE_PROXY_SECRET>`)
@@ -85,11 +87,15 @@ Creates Google Drive project folders via Google Apps Script proxy. Handles the 3
 **Request Body:**
 ```json
 {
-  "recordId": "recABC123",
+  "clientPmProjectRecordId": "recABC123",
   "projectName": "Acme Corp - Website Redesign",
-  "parentFolderId": "1folder..."  // optional
+  "parentFolderId": "1folder..."
 }
 ```
+
+- `clientPmProjectRecordId` — Required. Client PM OS Projects record ID (must start with `rec`). Legacy: `recordId` accepted. Do NOT pass HIVE OS record IDs.
+- `projectName` — Required. Name for the folder.
+- `parentFolderId` — Optional. Google Drive folder ID to create under.
 
 **Example Request:**
 ```bash
@@ -97,7 +103,7 @@ curl -X POST https://pm-intake-api.vercel.app/api/create-project-folder \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret" \
   -d '{
-    "recordId": "recABC123",
+    "clientPmProjectRecordId": "recABC123",
     "projectName": "Acme Corp - Website Redesign"
   }'
 ```
@@ -109,15 +115,15 @@ curl -X POST https://pm-intake-api.vercel.app/api/create-project-folder \
   "folderId": "1xYz789...",
   "folderUrl": "https://drive.google.com/drive/folders/1xYz789...",
   "reused": false,
-  "recordId": "recABC123",
+  "clientPmProjectRecordId": "recABC123",
   "projectName": "Acme Corp - Website Redesign"
 }
 ```
 
 **Error Responses:**
 - `401` - Missing or invalid `x-api-key` / Bearer token
-- `400` - Missing required fields (recordId, projectName)
-- `500` - Apps Script error (includes error snippet in logs)
+- `400` - Missing or invalid `clientPmProjectRecordId`, or record not found in Client PM OS Projects, or `hiveOsProjectRecordId` passed (rejected)
+- `500` - Apps Script error or base not configured
 
 **Airtable Automation Script:**
 See `scripts/airtable-create-project-folder.js` for a ready-to-use automation script.
@@ -137,14 +143,15 @@ Redirect-safe proxy for Google Apps Script Web Apps. Airtable Automations cannot
 {
   "gasUrl": "https://script.google.com/macros/s/.../exec",
   "mode": "client",
-  "clientRecordId": "recABC123",
+  "clientPmProjectRecordId": "recABC123",
   "clientName": "Acme Corp",
   "clientType": "prospect",
   "bucketRootFolderId": "1a2B3cDeFgHiJkLmNoPqRsTuVwXyZ"
 }
 ```
 
-- `gasUrl` - Required (or set `GAS_WEB_APP_URL` env var as fallback). Must be a script.google.com /exec URL.
+- `gasUrl` — Required (or set `GAS_WEB_APP_URL` env var as fallback). Must be a script.google.com /exec URL.
+- `clientPmProjectRecordId` — When creating project/client folders: Client PM OS Projects record ID (must start with `rec`). Legacy: `recordId`. Do NOT pass `hiveOsProjectRecordId`.
 - All other fields are passed through to the GAS endpoint.
 
 **Example Request:**

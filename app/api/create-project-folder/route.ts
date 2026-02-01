@@ -1,4 +1,13 @@
 import { NextResponse } from "next/server";
+import {
+  validateClientPmProjectRecordId,
+  logProjectRouteDebug,
+} from "@/lib/projectId";
+import {
+  verifyClientPmProjectExists,
+  resolveProjectIds,
+} from "@/lib/projectMapping";
+import { config } from "@/lib/config";
 
 /**
  * Proxy endpoint for Google Apps Script Web App.
@@ -116,15 +125,68 @@ export async function POST(req: Request) {
       );
     }
 
-    const { recordId, projectName, parentFolderId } = body;
+    const { projectName, parentFolderId, ...rest } = body;
 
-    // Validate required fields
-    if (!recordId || typeof recordId !== "string" || recordId.trim() === "") {
+    // Canonical identifier: clientPmProjectRecordId (Client PM OS Projects record ID)
+    // Accept recordId as legacy fallback. Reject hiveOsProjectRecordId — never pass HIVE OS ID to Client PM OS.
+    const rawClientPm = rest.clientPmProjectRecordId ?? rest.recordId;
+    const rawHiveOs = rest.hiveOsProjectRecordId;
+
+    if (rawHiveOs && !rawClientPm) {
+      const message =
+        "hiveOsProjectRecordId cannot be used for Client PM OS automation. " +
+        "Provide clientPmProjectRecordId (Client PM OS Projects record ID).";
+      console.log("[create-project-folder] Rejected: " + message);
+      return NextResponse.json({ ok: false, error: message }, { status: 400 });
+    }
+
+    const projectIdResult = validateClientPmProjectRecordId(rawClientPm);
+
+    if (!projectIdResult.ok) {
+      console.log(
+        "[create-project-folder] Validation failed:",
+        projectIdResult.error,
+        "rawClientPm=",
+        rawClientPm ? "(provided)" : "(missing)"
+      );
       return NextResponse.json(
-        { ok: false, error: "recordId is required and must be a non-empty string" },
+        { ok: false, error: projectIdResult.error },
         { status: 400 }
       );
     }
+
+    const clientPmProjectRecordId = projectIdResult.value;
+
+    // Verify record exists in Client PM OS Projects
+    if (!config.clientPmOsBaseId) {
+      const message =
+        "Client PM OS base not configured (CLIENT_PM_OS_BASE_ID or AIRTABLE_BASE_ID). Cannot verify project record.";
+      console.warn("[create-project-folder] " + message);
+      return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    }
+
+    const exists = await verifyClientPmProjectExists(clientPmProjectRecordId);
+    if (!exists) {
+      const message =
+        `Record ${clientPmProjectRecordId} not found in Client PM OS Projects (base ${config.clientPmOsBaseId}). ` +
+        "Verify clientPmProjectRecordId is from the Client PM OS base — do not pass HIVE OS record IDs.";
+      console.log("[create-project-folder] " + message);
+      return NextResponse.json(
+        { ok: false, error: message },
+        { status: 400 }
+      );
+    }
+
+    // Resolve both IDs for logging (optional — mapping may not exist)
+    const mapping = await resolveProjectIds({ clientPmProjectRecordId });
+
+    logProjectRouteDebug({
+      route: "create-project-folder",
+      clientPmProjectRecordId,
+      hiveOsProjectRecordId: mapping?.hiveOsProjectRecordId ?? null,
+      baseId: config.clientPmOsBaseId || undefined,
+      tableName: "Projects",
+    });
 
     if (!projectName || typeof projectName !== "string" || projectName.trim() === "") {
       return NextResponse.json(
@@ -133,14 +195,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Build payload with all required fields
+    // Build payload for GAS — always pass clientPmProjectRecordId (never hiveOsProjectRecordId)
     const payload: {
-      recordId: string;
+      clientPmProjectRecordId: string;
+      recordId: string; // legacy — GAS uses this internally
       projectName: string;
       templateFolderId: string;
       parentFolderId?: string;
     } = {
-      recordId: recordId.trim(),
+      clientPmProjectRecordId,
+      recordId: clientPmProjectRecordId,
       projectName: projectName.trim(),
       templateFolderId: TEMPLATE_FOLDER_ID,
     };

@@ -3,7 +3,7 @@
 // Paste this into an Airtable "Run script" action in an Automation.
 //
 // Input variables (configure in the Airtable script settings panel):
-//   recordId    – input.config().recordId   (the current Project record ID)
+//   clientPmProjectRecordId – input.config().recordId (Client PM OS Projects record ID)
 //
 // Required Airtable fields on the Projects table:
 //   "Project Name (Job #)"  – single-line text (used as folder name)
@@ -19,28 +19,35 @@
 
 // ─── Config ──────────────────────────────────────────────────────────
 const config = input.config();
-const recordId = config.recordId;
+const clientPmProjectRecordId = config.recordId; // Client PM OS Projects record ID (current record)
 
 // ⚠️ REPLACE these with your actual values
 const API_URL = 'https://pm-intake-api.vercel.app/api/create-project-folder';
 const API_SECRET = 'YOUR_AIRTABLE_PROXY_SECRET';  // ← replace with actual secret
 
+// ─── Validate clientPmProjectRecordId ─────────────────────────────────
+if (!clientPmProjectRecordId || typeof clientPmProjectRecordId !== 'string' ||
+    !clientPmProjectRecordId.trim().startsWith('rec')) {
+    output.text(`❌ Invalid clientPmProjectRecordId: must be an Airtable record ID (start with rec)`);
+    throw new Error('Invalid clientPmProjectRecordId');
+}
+
 // ─── Read record fields ──────────────────────────────────────────────
 const table = base.getTable('Projects');  // ← adjust table name if different
-const record = await table.selectRecordAsync(recordId, {
+const record = await table.selectRecordAsync(clientPmProjectRecordId, {
     fields: ['Project Name (Job #)', 'Client'],
 });
 
 if (!record) {
-    output.text(`❌ Record ${recordId} not found.`);
-    throw new Error(`Record ${recordId} not found`);
+    output.text(`❌ Record ${clientPmProjectRecordId} not found.`);
+    throw new Error(`Record ${clientPmProjectRecordId} not found`);
 }
 
 const projectName = record.getCellValueAsString('Project Name (Job #)') || '';
 
 if (!projectName) {
-    output.text(`❌ Project Name (Job #) is empty for record ${recordId}`);
-    await table.updateRecordAsync(recordId, {
+    output.text(`❌ Project Name (Job #) is empty for record ${clientPmProjectRecordId}`);
+    await table.updateRecordAsync(clientPmProjectRecordId, {
         'Folder Status': 'error',
         'Folder Error': 'Project Name (Job #) is required',
     });
@@ -74,7 +81,7 @@ try {
             'x-api-key': API_SECRET,  // Auth header
         },
         body: JSON.stringify({
-            recordId,
+            clientPmProjectRecordId,
             projectName,
             ...(parentFolderId ? { parentFolderId } : {}),
         }),
@@ -122,6 +129,9 @@ if (result.ok && result.folderUrl) {
     updates['Drive Folder URL'] = result.folderUrl;
 }
 
-await table.updateRecordAsync(recordId, updates);
+// Debug logging: clientPmProjectRecordId, route, table
+console.log(`[airtable-create-project-folder] clientPmProjectRecordId=${clientPmProjectRecordId}, route=airtable-create-project-folder, tableName=Projects`);
+
+await table.updateRecordAsync(clientPmProjectRecordId, updates);
 
 output.text(result.ok ? `✅ Folder created: ${result.folderUrl}` : `❌ ${result.error}`);

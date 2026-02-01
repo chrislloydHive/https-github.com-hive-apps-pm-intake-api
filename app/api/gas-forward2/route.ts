@@ -1,4 +1,13 @@
 import { NextResponse } from "next/server";
+import {
+  validateClientPmProjectRecordId,
+  logProjectRouteDebug,
+} from "@/lib/projectId";
+import {
+  verifyClientPmProjectExists,
+  resolveProjectIds,
+} from "@/lib/projectMapping";
+import { config } from "@/lib/config";
 
 const ALLOWED = new Set(["script.google.com", "script.googleusercontent.com"]);
 
@@ -7,25 +16,24 @@ const ALLOWED = new Set(["script.google.com", "script.googleusercontent.com"]);
  *
  * Required:
  * - gasUrl: The Google Apps Script web app URL to forward to
- * - recordId: Airtable record ID
+ * - clientPmProjectRecordId: Client PM OS Projects record ID (or recordId legacy)
  * - projectName: Name for the folder/project
  *
  * Optional:
  * - parentFolderId: Google Drive folder ID to create folder under (highest priority)
  * - clientType: "prospect" | "client" | etc. (used for routing if no parentFolderId)
  *
- * The GAS web app uses this routing logic:
- * 1. If parentFolderId provided → use it (explicit)
- * 2. If clientType === "prospect" → NEW_BUSINESS_ROOT_FOLDER_ID
- * 3. Otherwise → WORK_ROOT_FOLDER_ID (default)
+ * Do NOT pass hiveOsProjectRecordId — Client PM OS endpoints require clientPmProjectRecordId.
  */
 interface GasForwardPayload {
   gasUrl: string;
-  recordId: string;
+  clientPmProjectRecordId?: string;
+  recordId?: string; // legacy — prefer clientPmProjectRecordId
+  hiveOsProjectRecordId?: string; // rejected when alone — must not pass to Client PM OS
   projectName: string;
-  parentFolderId?: string;  // Google Drive folder ID for parent folder
+  parentFolderId?: string;
   clientType?: string;
-  [key: string]: unknown;   // Allow additional fields
+  [key: string]: unknown;
 }
 
 export async function GET() {
@@ -33,8 +41,9 @@ export async function GET() {
     ok: true,
     route: "gas-forward2",
     description: "Forwards requests to Google Apps Script web apps",
-    requiredFields: ["gasUrl", "recordId", "projectName"],
+    requiredFields: ["gasUrl", "clientPmProjectRecordId (or recordId)", "projectName"],
     optionalFields: ["parentFolderId", "clientType"],
+    note: "Do NOT pass hiveOsProjectRecordId — Client PM OS requires clientPmProjectRecordId",
   });
 }
 
@@ -63,6 +72,66 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Missing gasUrl" }, { status: 400 });
     }
 
+    // Canonical identifier: clientPmProjectRecordId (Client PM OS Projects record ID)
+    // Reject hiveOsProjectRecordId when alone — never pass HIVE OS ID to Client PM OS
+    const rawClientPm = body.clientPmProjectRecordId ?? body.recordId;
+    const rawHiveOs = body.hiveOsProjectRecordId;
+
+    if (rawHiveOs && !rawClientPm) {
+      const message =
+        "hiveOsProjectRecordId cannot be used for Client PM OS automation. " +
+        "Provide clientPmProjectRecordId (Client PM OS Projects record ID).";
+      console.log("[gas-forward2] Rejected: " + message);
+      return NextResponse.json({ ok: false, error: message }, { status: 400 });
+    }
+
+    const projectIdResult = validateClientPmProjectRecordId(rawClientPm);
+
+    if (!projectIdResult.ok) {
+      console.log(
+        "[gas-forward2] Validation failed:",
+        projectIdResult.error,
+        "rawClientPm=",
+        rawClientPm ? "(provided)" : "(missing)"
+      );
+      return NextResponse.json(
+        { ok: false, error: projectIdResult.error },
+        { status: 400 }
+      );
+    }
+
+    const clientPmProjectRecordId = projectIdResult.value;
+
+    // Verify record exists in Client PM OS Projects
+    if (!config.clientPmOsBaseId) {
+      const message =
+        "Client PM OS base not configured (CLIENT_PM_OS_BASE_ID or AIRTABLE_BASE_ID). Cannot verify project record.";
+      console.warn("[gas-forward2] " + message);
+      return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    }
+
+    const exists = await verifyClientPmProjectExists(clientPmProjectRecordId);
+    if (!exists) {
+      const message =
+        `Record ${clientPmProjectRecordId} not found in Client PM OS Projects (base ${config.clientPmOsBaseId}). ` +
+        "Verify clientPmProjectRecordId is from the Client PM OS base — do not pass HIVE OS record IDs.";
+      console.log("[gas-forward2] " + message);
+      return NextResponse.json(
+        { ok: false, error: message },
+        { status: 400 }
+      );
+    }
+
+    const mapping = await resolveProjectIds({ clientPmProjectRecordId });
+
+    logProjectRouteDebug({
+      route: "gas-forward2",
+      clientPmProjectRecordId,
+      hiveOsProjectRecordId: mapping?.hiveOsProjectRecordId ?? null,
+      baseId: config.clientPmOsBaseId || undefined,
+      tableName: "Projects",
+    });
+
     let url: URL;
     try {
       url = new URL(gasUrl);
@@ -77,18 +146,20 @@ export async function POST(req: Request) {
     // Extract gasUrl and forward everything else unchanged
     const { gasUrl: _ignored, ...payload } = body;
 
-    // Explicitly preserve parentFolderId - CRITICAL for folder routing
-    // This ensures it's not accidentally dropped or transformed
+    // Forward with clientPmProjectRecordId only — never pass hiveOsProjectRecordId to Client PM OS
     const forwardPayload = {
       ...payload,
-      // Re-assert parentFolderId to guarantee it's forwarded if provided
+      clientPmProjectRecordId,
+      recordId: clientPmProjectRecordId,
       ...(body.parentFolderId ? { parentFolderId: body.parentFolderId } : {}),
     };
 
-    // Log what we're forwarding (for debugging)
+    // Remove hiveOsProjectRecordId from forwarded payload
+    delete forwardPayload.hiveOsProjectRecordId;
+
     console.log("[gas-forward2] Forwarding to GAS:", {
       gasUrl: gasUrl.slice(0, 60) + "...",
-      recordId: forwardPayload.recordId || "(missing)",
+      clientPmProjectRecordId,
       projectName: forwardPayload.projectName || "(missing)",
       parentFolderId: forwardPayload.parentFolderId || "(not provided)",
       clientType: forwardPayload.clientType || "(not provided)",
@@ -134,13 +205,12 @@ export async function POST(req: Request) {
       );
     }
 
-    // Always return JSON, include debug info
     return NextResponse.json({
       ...parsed,
       upstreamStatus: upstream.status,
       _forwarded: {
         parentFolderId: forwardPayload.parentFolderId || null,
-        recordId: forwardPayload.recordId || null,
+        clientPmProjectRecordId: forwardPayload.clientPmProjectRecordId || null,
         projectName: forwardPayload.projectName || null,
       },
     });

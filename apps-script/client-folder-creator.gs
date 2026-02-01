@@ -66,11 +66,15 @@ function doGet() {
  *
  * Expected payload:
  * {
- *   recordId: string (required),
+ *   clientPmProjectRecordId: string (required - Client PM OS Projects record ID),
+ *   recordId: string (legacy - same as clientPmProjectRecordId),
  *   projectName: string (required),
  *   parentFolderId: string (optional - HIGHEST PRIORITY),
  *   clientType: string (optional - "prospect" triggers NEW_BUSINESS root)
  * }
+ *
+ * IMPORTANT: Only accept clientPmProjectRecordId. Do NOT accept hiveOsProjectRecordId —
+ * Client PM OS automations must pass Client PM OS Projects record ID only.
  */
 function doPost(e) {
   try {
@@ -80,29 +84,41 @@ function doPost(e) {
     var raw = e && e.postData && e.postData.contents ? e.postData.contents : "{}";
     var input = JSON.parse(raw);
 
-    // Log raw input for debugging
     Logger.log("Raw input: " + raw);
 
     // ==========================================================================
-    // EXTRACT FIELDS - Support multiple naming conventions
+    // EXTRACT FIELDS - Canonical: clientPmProjectRecordId (Client PM OS Projects)
+    // Support legacy: recordId, clientRecordId, recId. Reject hiveOsProjectRecordId.
     // ==========================================================================
-    var recordId = input.recordId || input.clientRecordId || input.recId || "";
+    var clientPmProjectRecordId = input.clientPmProjectRecordId || input.recordId ||
+        input.clientRecordId || input.recId || "";
     var projectName = input.projectName || input.clientName || input.name || "";
     var clientType = String(input.clientType || input.type || "").toLowerCase().trim();
 
-    // CRITICAL: parentFolderId takes HIGHEST PRIORITY
-    // Check all possible field names
     var parentFolderId = input.parentFolderId || input.bucketRootFolderId || input.rootFolderId || "";
 
-    Logger.log("Extracted fields: recordId=" + recordId + ", projectName=" + projectName +
-               ", clientType=" + clientType + ", parentFolderId=" + parentFolderId);
+    Logger.log("Extracted fields: clientPmProjectRecordId=" + clientPmProjectRecordId +
+               ", projectName=" + projectName + ", clientType=" + clientType +
+               ", parentFolderId=" + parentFolderId);
+
+    // Reject hiveOsProjectRecordId when used alone — Client PM OS requires clientPmProjectRecordId
+    if (!clientPmProjectRecordId && input.hiveOsProjectRecordId) {
+      return jsonResponse({
+        ok: false,
+        error: "hiveOsProjectRecordId cannot be used for Client PM OS automation. Provide clientPmProjectRecordId."
+      });
+    }
 
     // ==========================================================================
-    // VALIDATION
+    // VALIDATION - clientPmProjectRecordId must be present and start with rec
     // ==========================================================================
-    if (!recordId) {
-      return jsonResponse({ ok: false, error: "Missing recordId" });
+    if (!clientPmProjectRecordId || clientPmProjectRecordId.trim() === "") {
+      return jsonResponse({ ok: false, error: "Missing clientPmProjectRecordId (or recordId)" });
     }
+    if (!clientPmProjectRecordId.trim().startsWith("rec")) {
+      return jsonResponse({ ok: false, error: "clientPmProjectRecordId must be an Airtable record ID (must start with rec)" });
+    }
+    clientPmProjectRecordId = clientPmProjectRecordId.trim();
 
     if (!projectName) {
       return jsonResponse({ ok: false, error: "Missing projectName" });
@@ -198,8 +214,9 @@ function doPost(e) {
       folderUrl: targetFolder.getUrl(),
       chosenParentId: actualParentId,
       reused: reused,
-      // Echo back for confirmation
-      recordId: recordId,
+      // Echo back Client PM OS project ID (never hiveOsProjectRecordId)
+      clientPmProjectRecordId: clientPmProjectRecordId,
+      recordId: clientPmProjectRecordId,
       projectName: projectName,
       // Debug fields
       _debug: {
