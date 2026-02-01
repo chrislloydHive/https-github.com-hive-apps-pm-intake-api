@@ -8,15 +8,22 @@ import { NextResponse } from "next/server";
  * - Google Apps Script web apps always return a 302 redirect
  * - This server-side proxy follows the redirect and returns the response directly
  *
+ * AUTHENTICATION:
+ * Requires one of these headers:
+ *   - x-api-key: <AIRTABLE_PROXY_SECRET>
+ *   - Authorization: Bearer <AIRTABLE_PROXY_SECRET>
+ *
  * CONFIGURATION:
- * Set the following environment variable in Vercel:
+ * Set the following environment variables in Vercel:
+ *   AIRTABLE_PROXY_SECRET = your-secure-random-secret
  *   GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL = https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
  *
  * DEPLOYMENT STEPS:
  * 1. Deploy your Apps Script as a web app (Execute as: Me, Access: Anyone)
  * 2. Copy the deployment URL
  * 3. Set GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL in Vercel Environment Variables
- * 4. Redeploy the Vercel project
+ * 4. Set AIRTABLE_PROXY_SECRET in Vercel Environment Variables
+ * 5. Redeploy the Vercel project
  */
 
 // Template folder ID for project folder structure
@@ -53,8 +60,50 @@ function redactUrl(url: string): string {
   return url;
 }
 
+/**
+ * Validate auth header - supports x-api-key or Bearer token
+ * Does NOT log the secret value
+ */
+function checkAuth(req: Request): { ok: true; method: string } | { ok: false; error: string } {
+  const expectedSecret = (process.env.AIRTABLE_PROXY_SECRET || "").trim();
+
+  if (!expectedSecret) {
+    console.error("[create-project-folder] AIRTABLE_PROXY_SECRET not configured");
+    return { ok: false, error: "Server misconfigured: missing AIRTABLE_PROXY_SECRET" };
+  }
+
+  // Method 1: x-api-key header
+  const apiKey = req.headers.get("x-api-key");
+  if (apiKey && apiKey === expectedSecret) {
+    return { ok: true, method: "x-api-key" };
+  }
+
+  // Method 2: Authorization Bearer token
+  const authHeader = req.headers.get("authorization");
+  if (authHeader && authHeader === `Bearer ${expectedSecret}`) {
+    return { ok: true, method: "bearer" };
+  }
+
+  // Log auth failure (without revealing the secret)
+  console.warn("[create-project-folder] Auth failed: x-api-key=" + (apiKey ? "provided" : "missing") +
+    ", authorization=" + (authHeader ? "provided" : "missing"));
+
+  return { ok: false, error: "Unauthorized: provide x-api-key or Authorization Bearer header" };
+}
+
 export async function POST(req: Request) {
   const startTime = Date.now();
+
+  // Auth check first
+  const auth = checkAuth(req);
+  if (!auth.ok) {
+    console.log("[create-project-folder] Auth rejected");
+    return NextResponse.json(
+      { ok: false, error: auth.error },
+      { status: 401 }
+    );
+  }
+  console.log("[create-project-folder] Auth OK via", auth.method);
 
   try {
     let body: any;
@@ -128,8 +177,15 @@ export async function POST(req: Request) {
     // Log response details
     console.log("[create-project-folder] Response status:", response.status);
     console.log("[create-project-folder] Response content-type:", contentType);
-    console.log("[create-project-folder] Response body:", truncate(responseText, 2000));
     console.log("[create-project-folder] Elapsed time:", elapsed, "ms");
+
+    // Log full body on success, short snippet on error
+    if (response.ok) {
+      console.log("[create-project-folder] Response body:", truncate(responseText, 2000));
+    } else {
+      // Log short error snippet (first 500 chars) for debugging
+      console.error("[create-project-folder] Error response:", truncate(responseText, 500));
+    }
     console.log("[create-project-folder] ========================================");
 
     // Try to parse as JSON if applicable

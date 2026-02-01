@@ -74,6 +74,56 @@ curl -X POST http://localhost:3000/api/pm-intake \
 }
 ```
 
+### POST /api/create-project-folder
+
+Creates Google Drive project folders via Google Apps Script proxy. Handles the 302 redirect that Airtable Automations cannot follow.
+
+**Headers:**
+- `Content-Type: application/json`
+- `x-api-key: <AIRTABLE_PROXY_SECRET>` (or `Authorization: Bearer <AIRTABLE_PROXY_SECRET>`)
+
+**Request Body:**
+```json
+{
+  "recordId": "recABC123",
+  "projectName": "Acme Corp - Website Redesign",
+  "parentFolderId": "1folder..."  // optional
+}
+```
+
+**Example Request:**
+```bash
+curl -X POST https://pm-intake-api.vercel.app/api/create-project-folder \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: your-secret" \
+  -d '{
+    "recordId": "recABC123",
+    "projectName": "Acme Corp - Website Redesign"
+  }'
+```
+
+**Success Response:**
+```json
+{
+  "ok": true,
+  "folderId": "1xYz789...",
+  "folderUrl": "https://drive.google.com/drive/folders/1xYz789...",
+  "reused": false,
+  "recordId": "recABC123",
+  "projectName": "Acme Corp - Website Redesign"
+}
+```
+
+**Error Responses:**
+- `401` - Missing or invalid `x-api-key` / Bearer token
+- `400` - Missing required fields (recordId, projectName)
+- `500` - Apps Script error (includes error snippet in logs)
+
+**Airtable Automation Script:**
+See `scripts/airtable-create-project-folder.js` for a ready-to-use automation script.
+
+---
+
 ### POST /api/gas-proxy
 
 Redirect-safe proxy for Google Apps Script Web Apps. Airtable Automations cannot follow HTTP 302 redirects that GAS returns, so this proxy handles that server-side.
