@@ -242,6 +242,28 @@ export async function POST(req: Request) {
     // Get the Apps Script URL
     const appsScriptUrl = getAppsScriptUrl();
 
+    // TEMPORARY downstream-debug logging — remove after diagnosing
+    const downstreamParsed = new URL(appsScriptUrl);
+    console.log("[create-project-folder/downstream-debug]", {
+      host: downstreamParsed.host,
+      pathPrefix: downstreamParsed.pathname.slice(0, 30),
+      endsWithExec: downstreamParsed.pathname.endsWith("/exec"),
+      isScriptGoogle: downstreamParsed.host === "script.google.com",
+      source: process.env.GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL ? "env" : "fallback",
+    });
+
+    // Validate URL shape — must be a GAS exec URL
+    if (
+      downstreamParsed.host !== "script.google.com" ||
+      !downstreamParsed.pathname.startsWith("/macros/s/") ||
+      !downstreamParsed.pathname.endsWith("/exec")
+    ) {
+      const msg = "Downstream URL is not a valid Apps Script exec URL. " +
+        `Host: ${downstreamParsed.host}, path prefix: ${downstreamParsed.pathname.slice(0, 30)}`;
+      console.error("[create-project-folder] " + msg);
+      return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+    }
+
     // Log request details
     console.log("[create-project-folder] ========================================");
     console.log("[create-project-folder] Apps Script URL:", redactUrl(appsScriptUrl));
@@ -260,6 +282,15 @@ export async function POST(req: Request) {
     const responseText = await response.text();
     const contentType = response.headers.get("content-type") || "application/json";
     const elapsed = Date.now() - startTime;
+
+    // TEMPORARY downstream-response-debug — remove after diagnosing
+    console.log("[create-project-folder/downstream-response]", {
+      status: response.status,
+      contentType,
+      bodySnippet: truncate(responseText, 100),
+      isHtml: contentType.includes("text/html"),
+      elapsed,
+    });
 
     // Log response details
     console.log("[create-project-folder] Response status:", response.status);
