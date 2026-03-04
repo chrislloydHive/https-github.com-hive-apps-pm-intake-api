@@ -247,10 +247,11 @@ export async function POST(req: Request) {
     const downstreamParsed = new URL(appsScriptUrl);
     console.log("[create-project-folder/downstream-debug]", {
       host: downstreamParsed.host,
-      pathPrefix: downstreamParsed.pathname.slice(0, 30),
+      pathPrefix: downstreamParsed.pathname.slice(0, 40),
       endsWithExec: downstreamParsed.pathname.endsWith("/exec"),
       isScriptGoogle: downstreamParsed.host === "script.google.com",
       source: process.env.GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL ? "env" : "fallback",
+      vercelEnv: process.env.VERCEL_ENV,
     });
 
     // Validate URL shape — must be a GAS exec URL
@@ -291,7 +292,7 @@ export async function POST(req: Request) {
     console.log("[create-project-folder/downstream-response]", {
       status: response.status,
       contentType,
-      bodySnippet: truncate(responseText, 100),
+      bodySnippet: truncate(responseText, 120),
       isHtml: contentType.includes("text/html"),
       elapsed,
     });
@@ -310,6 +311,23 @@ export async function POST(req: Request) {
     }
     console.log("[create-project-folder] ========================================");
 
+    // Build debug info for error responses
+    const downstreamDebug = {
+      downstreamHost: downstreamParsed.host,
+      downstreamPathPrefix: downstreamParsed.pathname.slice(0, 40),
+      downstreamStatus: response.status,
+      downstreamContentType: contentType,
+    };
+
+    // If downstream returned non-OK, return structured error with debug
+    if (!response.ok) {
+      console.error("[create-project-folder] Downstream error body:", truncate(responseText, 120));
+      return NextResponse.json(
+        { ok: false, error: "Downstream error", debug: downstreamDebug },
+        { status: 502 }
+      );
+    }
+
     // Try to parse as JSON if applicable
     if (contentType.includes("application/json")) {
       try {
@@ -317,19 +335,20 @@ export async function POST(req: Request) {
         // Return the FULL JSON response from Apps Script (including _debug)
         return NextResponse.json(jsonData, { status: response.status });
       } catch {
-        // If parsing fails, return as text
-        return new NextResponse(responseText, {
-          status: response.status,
-          headers: { "Content-Type": contentType },
-        });
+        console.error("[create-project-folder] JSON parse failed, body:", truncate(responseText, 120));
+        return NextResponse.json(
+          { ok: false, error: "Downstream returned invalid JSON", debug: downstreamDebug },
+          { status: 502 }
+        );
       }
     }
 
-    // Return non-JSON responses as-is
-    return new NextResponse(responseText, {
-      status: response.status,
-      headers: { "Content-Type": contentType },
-    });
+    // Non-JSON response (likely HTML error page)
+    console.error("[create-project-folder] Non-JSON downstream response:", truncate(responseText, 120));
+    return NextResponse.json(
+      { ok: false, error: "Downstream returned non-JSON response", debug: downstreamDebug },
+      { status: 502 }
+    );
   } catch (error: any) {
     console.error("[create-project-folder] Proxy error:", error);
     return NextResponse.json(
