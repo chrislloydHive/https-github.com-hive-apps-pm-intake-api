@@ -38,19 +38,15 @@ import { config } from "@/lib/config";
 // Template folder ID for project folder structure
 const TEMPLATE_FOLDER_ID = "1l2Ksbkoomy7OmuHgrAFM0_r-d9UJgQq4";
 
-// Fallback URL (legacy deployment) - only used if env var is missing
-const FALLBACK_APPS_SCRIPT_URL =
-  "https://script.google.com/macros/s/AKfycbz4j2dLWepBYAEXznzuA5Vfxh95ZX7J8CJg_iZnncNpwt4QtP29194z7GImobBPMJrj/exec";
-
 function getAppsScriptUrl(): string {
   const envUrl = process.env.GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL;
-  if (envUrl && envUrl.trim() !== "") {
-    return envUrl.trim();
+  if (!envUrl || envUrl.trim() === "") {
+    throw new Error(
+      "GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL is not set. " +
+      "Set it in Vercel to: https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec"
+    );
   }
-  console.warn(
-    "[create-project-folder] WARNING: GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL not set, using fallback URL"
-  );
-  return FALLBACK_APPS_SCRIPT_URL;
+  return envUrl.trim();
 }
 
 function truncate(str: string, maxLen: number): string {
@@ -254,17 +250,18 @@ export async function POST(req: Request) {
       vercelEnv: process.env.VERCEL_ENV,
     });
 
-    // Validate URL shape — must be a GAS exec URL
-    // Accept both public form (/macros/s/<ID>/exec) and domain-scoped form (/a/macros/<domain>/s/<ID>/exec)
-    const isPublicForm = downstreamParsed.pathname.startsWith("/macros/s/");
-    const isDomainForm = /^\/a\/macros\/[^/]+\/s\//.test(downstreamParsed.pathname);
+    // Validate URL shape — ONLY accept public exec URL format
+    // Domain-scoped (/a/macros/<domain>/s/...) returns 401 HTML — reject it
     if (
       downstreamParsed.host !== "script.google.com" ||
-      (!isPublicForm && !isDomainForm) ||
+      !downstreamParsed.pathname.startsWith("/macros/s/") ||
       !downstreamParsed.pathname.endsWith("/exec")
     ) {
-      const msg = "Downstream URL is not a valid Apps Script exec URL. " +
-        `Host: ${downstreamParsed.host}, path prefix: ${downstreamParsed.pathname.slice(0, 30)}`;
+      const msg =
+        "GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL is not in the required format. " +
+        `Got: host=${downstreamParsed.host}, path=${downstreamParsed.pathname.slice(0, 40)}. ` +
+        "Required: https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec " +
+        "(NOT /a/macros/<domain>/...)";
       console.error("[create-project-folder] " + msg);
       return NextResponse.json({ ok: false, error: msg }, { status: 500 });
     }
