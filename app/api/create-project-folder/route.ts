@@ -60,7 +60,8 @@ function truncate(str: string, maxLen: number): string {
 
 function redactUrl(url: string): string {
   // Redact the deployment ID portion for logging (show first 20 chars of ID)
-  const match = url.match(/\/macros\/s\/([^/]+)\/exec/);
+  // Handles both /macros/s/<ID>/exec and /a/macros/<domain>/s/<ID>/exec
+  const match = url.match(/\/s\/([^/]+)\/exec/);
   if (match && match[1]) {
     const id = match[1];
     const redacted = id.slice(0, 20) + "..." + id.slice(-4);
@@ -253,9 +254,12 @@ export async function POST(req: Request) {
     });
 
     // Validate URL shape — must be a GAS exec URL
+    // Accept both public form (/macros/s/<ID>/exec) and domain-scoped form (/a/macros/<domain>/s/<ID>/exec)
+    const isPublicForm = downstreamParsed.pathname.startsWith("/macros/s/");
+    const isDomainForm = /^\/a\/macros\/[^/]+\/s\//.test(downstreamParsed.pathname);
     if (
       downstreamParsed.host !== "script.google.com" ||
-      !downstreamParsed.pathname.startsWith("/macros/s/") ||
+      (!isPublicForm && !isDomainForm) ||
       !downstreamParsed.pathname.endsWith("/exec")
     ) {
       const msg = "Downstream URL is not a valid Apps Script exec URL. " +
