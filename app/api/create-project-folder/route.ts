@@ -73,22 +73,32 @@ function redactUrl(url: string): string {
  * Validate auth header - supports x-api-key or Bearer token
  * Does NOT log the secret value
  */
-function checkAuth(req: Request): { ok: true; method: string } | { ok: false; error: string } {
+function checkAuth(req: Request): { ok: true; method: string } | { ok: false; error: string; debug: Record<string, unknown> } {
   const expectedSecret = (process.env.AIRTABLE_PROXY_SECRET || "").trim();
+  const apiKey = req.headers.get("x-api-key");
+  const authHeader = req.headers.get("authorization");
+
+  // TEMPORARY auth-debug logging — remove after diagnosing auth failures
+  console.log("[create-project-folder/auth]", {
+    hasApiKey: !!apiKey,
+    apiKeyLen: apiKey?.length ?? 0,
+    hasAuth: !!authHeader,
+    authStartsBearer: authHeader?.startsWith("Bearer ") ?? false,
+    expectedLen: expectedSecret.length,
+    vercelEnv: process.env.VERCEL_ENV ?? "unknown",
+  });
 
   if (!expectedSecret) {
     console.error("[create-project-folder] AIRTABLE_PROXY_SECRET not configured");
-    return { ok: false, error: "Server misconfigured: missing AIRTABLE_PROXY_SECRET" };
+    return { ok: false, error: "Server misconfigured: missing AIRTABLE_PROXY_SECRET", debug: { expectedLen: 0 } };
   }
 
   // Method 1: x-api-key header
-  const apiKey = req.headers.get("x-api-key");
   if (apiKey && apiKey === expectedSecret) {
     return { ok: true, method: "x-api-key" };
   }
 
   // Method 2: Authorization Bearer token
-  const authHeader = req.headers.get("authorization");
   if (authHeader && authHeader === `Bearer ${expectedSecret}`) {
     return { ok: true, method: "bearer" };
   }
@@ -97,7 +107,15 @@ function checkAuth(req: Request): { ok: true; method: string } | { ok: false; er
   console.warn("[create-project-folder] Auth failed: x-api-key=" + (apiKey ? "provided" : "missing") +
     ", authorization=" + (authHeader ? "provided" : "missing"));
 
-  return { ok: false, error: "Unauthorized: provide x-api-key or Authorization Bearer header" };
+  return {
+    ok: false,
+    error: "Unauthorized",
+    debug: {
+      expectedLen: expectedSecret.length,
+      apiKeyLen: apiKey?.length ?? 0,
+      hasAuth: !!authHeader,
+    },
+  };
 }
 
 export async function POST(req: Request) {
@@ -108,7 +126,7 @@ export async function POST(req: Request) {
   if (!auth.ok) {
     console.log("[create-project-folder] Auth rejected");
     return NextResponse.json(
-      { ok: false, error: auth.error },
+      { ok: false, error: auth.error, debug: auth.debug },
       { status: 401 }
     );
   }
