@@ -96,10 +96,14 @@ function doPost(e) {
     var clientType = String(input.clientType || input.type || "").toLowerCase().trim();
 
     var parentFolderId = input.parentFolderId || input.bucketRootFolderId || input.rootFolderId || "";
+    var clientNameInput = input.clientName || "";
+    var clientsRootFolderId = input.clientsRootFolderId || "";
 
     Logger.log("Extracted fields: clientPmProjectRecordId=" + clientPmProjectRecordId +
                ", projectName=" + projectName + ", clientType=" + clientType +
-               ", parentFolderId=" + parentFolderId);
+               ", parentFolderId=" + parentFolderId +
+               ", clientName=" + clientNameInput +
+               ", clientsRootFolderId=" + clientsRootFolderId);
 
     // Reject hiveOsProjectRecordId when used alone — Client PM OS requires clientPmProjectRecordId
     if (!clientPmProjectRecordId && input.hiveOsProjectRecordId) {
@@ -136,13 +140,28 @@ function doPost(e) {
       routingRule = "explicit-parentFolderId";
       Logger.log("Using explicit parentFolderId: " + chosenParentId);
     }
-    // RULE 2: Prospects go to NEW_BUSINESS (only if no parentFolderId)
+    // RULE 2: clientName lookup — get or create client folder under clientsRootFolderId
+    else if (clientNameInput && clientNameInput.trim() !== "" &&
+             clientsRootFolderId && clientsRootFolderId.trim() !== "") {
+      var rootFolder = DriveApp.getFolderById(clientsRootFolderId.trim());
+      var clientFolder = findChildFolderByName_(rootFolder, clientNameInput.trim());
+      if (clientFolder) {
+        chosenParentId = clientFolder.getId();
+        Logger.log("Found existing client folder: " + clientNameInput.trim() + " (" + chosenParentId + ")");
+      } else {
+        clientFolder = rootFolder.createFolder(clientNameInput.trim());
+        chosenParentId = clientFolder.getId();
+        Logger.log("Created new client folder: " + clientNameInput.trim() + " (" + chosenParentId + ")");
+      }
+      routingRule = "clientName-lookup";
+    }
+    // RULE 3: Prospects go to NEW_BUSINESS (only if no parentFolderId)
     else if (clientType === "prospect") {
       chosenParentId = CONFIG.NEW_BUSINESS_ROOT_FOLDER_ID;
       routingRule = "derived-prospect";
       Logger.log("Using prospect root: " + chosenParentId);
     }
-    // RULE 3: Default to WORK root (only if no parentFolderId)
+    // RULE 4: Default to WORK root (only if no parentFolderId)
     else {
       chosenParentId = CONFIG.WORK_ROOT_FOLDER_ID;
       routingRule = "derived-default";
@@ -221,6 +240,8 @@ function doPost(e) {
       // Debug fields
       _debug: {
         inputParentFolderId: parentFolderId || "(not provided)",
+        inputClientName: clientNameInput || "(not provided)",
+        inputClientsRootFolderId: clientsRootFolderId || "(not provided)",
         inputClientType: clientType || "(not provided)",
         routingRule: routingRule,
         parentFolderName: parentFolder.getName(),

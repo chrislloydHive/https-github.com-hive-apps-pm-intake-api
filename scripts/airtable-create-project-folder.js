@@ -4,6 +4,7 @@
 //
 // Input variables (configure in the Airtable script settings panel):
 //   clientPmProjectRecordId – input.config().recordId (Client PM OS Projects record ID)
+//   clientName              – input.config().clientName (Client record's "Name" field)
 //
 // Required Airtable fields on the Projects table:
 //   "Project Name (Job #)"  – single-line text (used as folder name)
@@ -20,6 +21,7 @@
 // ─── Config ──────────────────────────────────────────────────────────
 const config = input.config();
 const clientPmProjectRecordId = config.recordId; // Client PM OS Projects record ID (current record)
+const clientName = config.clientName || '';       // Client name for folder routing (map to Client "Name" field)
 
 // ⚠️ REPLACE these with your actual values
 const API_URL = 'https://pm-intake-api.vercel.app/api/create-project-folder';
@@ -84,6 +86,7 @@ try {
             clientPmProjectRecordId,
             projectName,
             ...(parentFolderId ? { parentFolderId } : {}),
+            ...(clientName ? { clientName } : {}),
         }),
     });
 

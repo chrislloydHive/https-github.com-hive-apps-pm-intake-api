@@ -38,6 +38,9 @@ import { config } from "@/lib/config";
 // Template folder ID for project folder structure
 const TEMPLATE_FOLDER_ID = "1l2Ksbkoomy7OmuHgrAFM0_r-d9UJgQq4";
 
+// Default root folder for /Work/Clients/
+const DEFAULT_CLIENTS_ROOT_FOLDER_ID = "1BzSDyj4xNT36qJKckPOoxifYZH4mcPQo";
+
 function getAppsScriptUrl(): string {
   const envUrl = process.env.GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL;
   if (!envUrl || envUrl.trim() === "") {
@@ -145,7 +148,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { projectName, parentFolderId, ...rest } = body;
+    const { projectName, parentFolderId, clientName, ...rest } = body;
 
     // Canonical identifier: clientPmProjectRecordId (Client PM OS Projects record ID)
     // Accept recordId as legacy fallback. Reject hiveOsProjectRecordId — never pass HIVE OS ID to Client PM OS.
@@ -222,6 +225,8 @@ export async function POST(req: Request) {
       projectName: string;
       templateFolderId: string;
       parentFolderId?: string;
+      clientName?: string;
+      clientsRootFolderId?: string;
     } = {
       clientPmProjectRecordId,
       recordId: clientPmProjectRecordId,
@@ -229,11 +234,17 @@ export async function POST(req: Request) {
       templateFolderId: TEMPLATE_FOLDER_ID,
     };
 
-    // Optional: parentFolderId for client-specific folder routing
-    // When provided, the project folder will be created under this parent
-    // When missing, the Apps Script uses the default Work root folder
+    // Priority: explicit parentFolderId takes precedence over clientName routing
     if (parentFolderId && typeof parentFolderId === "string" && parentFolderId.trim() !== "") {
       payload.parentFolderId = parentFolderId.trim();
+    } else if (clientName && typeof clientName === "string" && clientName.trim().replace(/\s+/g, " ") !== "") {
+      // Sanitize: trim and collapse multiple spaces
+      const sanitizedClientName = clientName.trim().replace(/\s+/g, " ");
+      const clientsRootFolderId = process.env.CLIENTS_ROOT_FOLDER_ID || DEFAULT_CLIENTS_ROOT_FOLDER_ID;
+      payload.clientName = sanitizedClientName;
+      payload.clientsRootFolderId = clientsRootFolderId;
+      console.log("[create-project-folder] clientName routing: clientName=" + sanitizedClientName +
+        ", clientsRootFolderId=" + clientsRootFolderId);
     }
 
     // Get the Apps Script URL
