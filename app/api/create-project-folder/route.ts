@@ -79,13 +79,17 @@ function checkAuth(req: Request): { ok: true; method: string } | { ok: false; er
   const authHeader = req.headers.get("authorization");
 
   // TEMPORARY auth-debug logging — remove after diagnosing auth failures
-  console.log("[create-project-folder/auth]", {
+  console.log("[create-project-folder/auth-debug]", {
+    expectedLen: expectedSecret.length,
     hasApiKey: !!apiKey,
     apiKeyLen: apiKey?.length ?? 0,
     hasAuth: !!authHeader,
     authStartsBearer: authHeader?.startsWith("Bearer ") ?? false,
-    expectedLen: expectedSecret.length,
-    vercelEnv: process.env.VERCEL_ENV ?? "unknown",
+    authLen: authHeader?.length ?? 0,
+    vercelEnv: process.env.VERCEL_ENV,
+    nodeEnv: process.env.NODE_ENV,
+    url: req.url,
+    method: req.method,
   });
 
   if (!expectedSecret) {
@@ -114,6 +118,7 @@ function checkAuth(req: Request): { ok: true; method: string } | { ok: false; er
       expectedLen: expectedSecret.length,
       apiKeyLen: apiKey?.length ?? 0,
       hasAuth: !!authHeader,
+      authStartsBearer: authHeader?.startsWith("Bearer ") ?? false,
     },
   };
 }
