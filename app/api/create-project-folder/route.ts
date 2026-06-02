@@ -8,6 +8,7 @@ import {
   resolveProjectIds,
 } from "@/lib/projectMapping";
 import { config } from "@/lib/config";
+import { resolveClientProjectsFolder } from "@/lib/resolveClientProjectsFolder";
 
 /**
  * Proxy endpoint for Google Apps Script Web App.
@@ -37,9 +38,6 @@ import { config } from "@/lib/config";
 
 // Template folder ID for project folder structure
 const TEMPLATE_FOLDER_ID = "1l2Ksbkoomy7OmuHgrAFM0_r-d9UJgQq4";
-
-// Default root folder for /Work/Clients/
-const DEFAULT_CLIENTS_ROOT_FOLDER_ID = "1BzSDyj4xNT36qJKckPOoxifYZH4mcPQo";
 
 function getAppsScriptUrl(): string {
   const envUrl = process.env.GOOGLE_APPS_SCRIPT_CREATE_PROJECT_FOLDER_URL;
@@ -148,7 +146,13 @@ export async function POST(req: Request) {
       );
     }
 
-    const { projectName, parentFolderId, clientName, ...rest } = body;
+    const {
+      projectName,
+      parentFolderId: bodyParentFolderId,
+      clientFolderId,
+      clientName,
+      ...rest
+    } = body;
 
     // Canonical identifier: clientPmProjectRecordId (Client PM OS Projects record ID)
     // Accept recordId as legacy fallback. Reject hiveOsProjectRecordId — never pass HIVE OS ID to Client PM OS.
@@ -218,34 +222,47 @@ export async function POST(req: Request) {
       );
     }
 
+    // Parent MUST be the client's Projects folder from Companies.Drive Folder ID —
+    // never search by client name under a shared clients root (prefix collisions).
+    const parentResolution = await resolveClientProjectsFolder({
+      clientFolderId:
+        typeof clientFolderId === "string"
+          ? clientFolderId
+          : typeof bodyParentFolderId === "string"
+            ? bodyParentFolderId
+            : undefined,
+      clientPmProjectRecordId,
+      clientName: typeof clientName === "string" ? clientName : undefined,
+    });
+
+    if (!parentResolution.ok) {
+      console.log("[create-project-folder] Parent folder resolution failed:", parentResolution.error);
+      return NextResponse.json(
+        { ok: false, error: parentResolution.error },
+        { status: 400 },
+      );
+    }
+
+    console.log("[create-project-folder] Parent Projects folder resolved", {
+      folderId: parentResolution.folderId,
+      source: parentResolution.source,
+      companyRecordId: parentResolution.companyRecordId ?? null,
+    });
+
     // Build payload for GAS — always pass clientPmProjectRecordId (never hiveOsProjectRecordId)
     const payload: {
       clientPmProjectRecordId: string;
       recordId: string; // legacy — GAS uses this internally
       projectName: string;
       templateFolderId: string;
-      parentFolderId?: string;
-      clientName?: string;
-      clientsRootFolderId?: string;
+      parentFolderId: string;
     } = {
       clientPmProjectRecordId,
       recordId: clientPmProjectRecordId,
       projectName: projectName.trim(),
       templateFolderId: TEMPLATE_FOLDER_ID,
+      parentFolderId: parentResolution.folderId,
     };
-
-    // Priority: explicit parentFolderId takes precedence over clientName routing
-    if (parentFolderId && typeof parentFolderId === "string" && parentFolderId.trim() !== "") {
-      payload.parentFolderId = parentFolderId.trim();
-    } else if (clientName && typeof clientName === "string" && clientName.trim().replace(/\s+/g, " ") !== "") {
-      // Sanitize: trim and collapse multiple spaces
-      const sanitizedClientName = clientName.trim().replace(/\s+/g, " ");
-      const clientsRootFolderId = process.env.CLIENTS_ROOT_FOLDER_ID || DEFAULT_CLIENTS_ROOT_FOLDER_ID;
-      payload.clientName = sanitizedClientName;
-      payload.clientsRootFolderId = clientsRootFolderId;
-      console.log("[create-project-folder] clientName routing: clientName=" + sanitizedClientName +
-        ", clientsRootFolderId=" + clientsRootFolderId);
-    }
 
     // Get the Apps Script URL
     const appsScriptUrl = getAppsScriptUrl();

@@ -4,9 +4,12 @@
  * Creates client/project folders in Google Drive.
  *
  * PRIORITY ORDER for parent folder selection:
- * 1. parentFolderId (HIGHEST - if provided, ALWAYS use it)
- * 2. clientType === "prospect" → NEW_BUSINESS_ROOT_FOLDER_ID
- * 3. WORK_ROOT_FOLDER_ID (default)
+ * 1. parentFolderId (REQUIRED for client projects — the client's Projects folder id
+ *    from Companies."Drive Folder ID", resolved by pm-intake-api)
+ * 2. clientType === "prospect" → NEW_BUSINESS_ROOT_FOLDER_ID (only when parentFolderId omitted)
+ *
+ * Legacy clientName + clientsRootFolderId routing was removed — it nested standalone
+ * clients (e.g. "Car Toys Oregon") under a prefix match inside "Car Toys".
  *
  * If a folder with the same name already exists under the chosen parent,
  * it will be reused instead of creating a duplicate.
@@ -96,14 +99,10 @@ function doPost(e) {
     var clientType = String(input.clientType || input.type || "").toLowerCase().trim();
 
     var parentFolderId = input.parentFolderId || input.bucketRootFolderId || input.rootFolderId || "";
-    var clientNameInput = input.clientName || "";
-    var clientsRootFolderId = input.clientsRootFolderId || "";
 
     Logger.log("Extracted fields: clientPmProjectRecordId=" + clientPmProjectRecordId +
                ", projectName=" + projectName + ", clientType=" + clientType +
-               ", parentFolderId=" + parentFolderId +
-               ", clientName=" + clientNameInput +
-               ", clientsRootFolderId=" + clientsRootFolderId);
+               ", parentFolderId=" + parentFolderId);
 
     // Reject hiveOsProjectRecordId when used alone — Client PM OS requires clientPmProjectRecordId
     if (!clientPmProjectRecordId && input.hiveOsProjectRecordId) {
@@ -134,38 +133,25 @@ function doPost(e) {
     var chosenParentId;
     var routingRule;
 
-    // RULE 1: If parentFolderId is provided, ALWAYS use it - no exceptions
+    // RULE 1: parentFolderId = client's Projects folder (from Companies.Drive Folder ID)
     if (parentFolderId && parentFolderId.trim() !== "") {
       chosenParentId = parentFolderId.trim();
       routingRule = "explicit-parentFolderId";
-      Logger.log("Using explicit parentFolderId: " + chosenParentId);
+      Logger.log("Using explicit parentFolderId (client Projects folder): " + chosenParentId);
     }
-    // RULE 2: clientName lookup — get or create client folder under clientsRootFolderId
-    else if (clientNameInput && clientNameInput.trim() !== "" &&
-             clientsRootFolderId && clientsRootFolderId.trim() !== "") {
-      var rootFolder = DriveApp.getFolderById(clientsRootFolderId.trim());
-      var clientFolder = findChildFolderByName_(rootFolder, clientNameInput.trim());
-      if (clientFolder) {
-        chosenParentId = clientFolder.getId();
-        Logger.log("Found existing client folder: " + clientNameInput.trim() + " (" + chosenParentId + ")");
-      } else {
-        clientFolder = rootFolder.createFolder(clientNameInput.trim());
-        chosenParentId = clientFolder.getId();
-        Logger.log("Created new client folder: " + clientNameInput.trim() + " (" + chosenParentId + ")");
-      }
-      routingRule = "clientName-lookup";
-    }
-    // RULE 3: Prospects go to NEW_BUSINESS (only if no parentFolderId)
+    // RULE 2: Prospects only — when API did not send a parent
     else if (clientType === "prospect") {
       chosenParentId = CONFIG.NEW_BUSINESS_ROOT_FOLDER_ID;
       routingRule = "derived-prospect";
       Logger.log("Using prospect root: " + chosenParentId);
     }
-    // RULE 4: Default to WORK root (only if no parentFolderId)
     else {
-      chosenParentId = CONFIG.WORK_ROOT_FOLDER_ID;
-      routingRule = "derived-default";
-      Logger.log("Using default work root: " + chosenParentId);
+      return jsonResponse({
+        ok: false,
+        error: "Missing parentFolderId. The API must resolve the client's Projects folder from " +
+               "Companies.Drive Folder ID and pass it as parentFolderId. " +
+               "clientName/clientsRootFolderId routing is no longer supported."
+      });
     }
 
     // ==========================================================================
@@ -240,8 +226,6 @@ function doPost(e) {
       // Debug fields
       _debug: {
         inputParentFolderId: parentFolderId || "(not provided)",
-        inputClientName: clientNameInput || "(not provided)",
-        inputClientsRootFolderId: clientsRootFolderId || "(not provided)",
         inputClientType: clientType || "(not provided)",
         routingRule: routingRule,
         parentFolderName: parentFolder.getName(),

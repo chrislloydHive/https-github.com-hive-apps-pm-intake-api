@@ -13,6 +13,7 @@ export const config = {
 export const tables = {
   inbox: process.env.AIRTABLE_INBOX_TABLE_NAME ?? "Inbox",
   projects: process.env.AIRTABLE_PROJECTS_TABLE_NAME ?? "Projects",
+  companies: process.env.AIRTABLE_COMPANIES_TABLE_NAME ?? "Companies",
 };
 
 // Field names for Inbox

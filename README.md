@@ -88,14 +88,19 @@ Creates Google Drive project folders via Google Apps Script proxy. Handles the 3
 ```json
 {
   "clientPmProjectRecordId": "recABC123",
-  "projectName": "Acme Corp - Website Redesign",
-  "parentFolderId": "1folder..."
+  "projectName": "294CAR-OR Portland Search Campaign",
+  "clientName": "Car Toys Oregon",
+  "clientFolderId": "1g4vXY191HJ0Btw6zFY9WwxvgGsfli4fC"
 }
 ```
 
 - `clientPmProjectRecordId` — Required. Client PM OS Projects record ID (must start with `rec`). Legacy: `recordId` accepted. Do NOT pass HIVE OS record IDs.
-- `projectName` — Required. Name for the folder.
-- `parentFolderId` — Optional. Google Drive folder ID to create under.
+- `projectName` — Required. Name for the project folder (Job # + title).
+- `clientName` — Recommended. Exact `Company Name` on Companies (used only if Project→Client link is missing).
+- `clientFolderId` — Optional but recommended. The client's **Projects** folder id from Companies `Drive Folder ID`. When omitted, the API resolves it from Airtable (Project → Client link, then exact company name). **Never** searches Drive by client name under a shared root (avoids prefix collisions like "Car Toys Oregon" under "Car Toys").
+- `parentFolderId` — Legacy alias for `clientFolderId`.
+
+Parent folder resolution order: `clientFolderId` / `parentFolderId` → Project `Client` link → exact `Company Name` match. There is no fallback to a hardcoded clients root.
 
 **Example Request:**
 ```bash
@@ -126,7 +131,17 @@ curl -X POST https://pm-intake-api.vercel.app/api/create-project-folder \
 - `500` - Apps Script error or base not configured
 
 **Airtable Automation Script:**
-See `scripts/airtable-create-project-folder.js` for a ready-to-use automation script.
+See `scripts/airtable-create-project-folder.js` for a ready-to-use automation script. Map `apiSecret` to a secret input (do not hardcode `AIRTABLE_PROXY_SECRET` in the script).
+
+**Prefix-collision manual test (Car Toys vs Car Toys Oregon):**
+```bash
+# Oregon project must land under Oregon's Projects folder, not inside Car Toys root
+curl -X POST https://pm-intake-api.vercel.app/api/create-project-folder \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $AIRTABLE_PROXY_SECRET" \
+  -d '{"clientPmProjectRecordId":"recYOUR_PROJECT","projectName":"TEST Oregon","clientName":"Car Toys Oregon"}'
+```
+Unit tests: `npm test` → `lib/resolveClientProjectsFolder.test.ts`.
 
 ---
 
